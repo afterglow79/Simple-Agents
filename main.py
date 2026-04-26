@@ -201,28 +201,43 @@ def handle_tool_calls(response: str) -> str:
 
 
 
-def call_agent(model: str, agent_name: str, shared_history: list, max_tokens = 4096):
-    system        = PLANNER_SYSTEM + TOOL_INSTRUCTIONS if agent_name == "PLANNER" else CODER_SYSTEM + TOOL_INSTRUCTIONS
-    model_short   = "Step-Flash" if agent_name == "PLANNER" else "Qwen3-480B"
-    messages      = [{"role": "system", "content": system}] + shared_history
+def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=4096) -> str:
+    system      = PLANNER_SYSTEM if agent_name == "PLANNER" else CODER_SYSTEM
+    model_short = "Step-Flash" if agent_name == "PLANNER" else "Qwen3-480B"
+    msg_list    = [{"role": "system", "content": system}] + shared_history  # renamed
 
-    spinner = Spinner(agent_name, model_short)
-    spinner.start()
-    t0 = time.time()
+    max_retries = 5
+    base_delay  = 5
 
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=0.7,
-        )
-        content = response.choices[0].message.content
-    finally:
-        spinner.stop()
+    for attempt in range(max_retries):
+        spinner = Spinner(agent_name, model_short)
+        spinner.start()
+        t0 = time.time()
 
-    print_turn_timing(agent_name, time.time() - t0)
-    return content
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=msg_list,                        # renamed
+                max_tokens=max_tokens,
+                temperature=0.7,
+            )
+            spinner.stop()
+            print_turn_timing(agent_name, time.time() - t0)
+            return response.choices[0].message.content
+
+        except openai.RateLimitError:
+            spinner.stop()
+            delay = base_delay * (2 ** attempt) + random.uniform(0, 2)
+            print(f"\n  {C.YELLOW}⚠ Rate limited. Waiting {delay:.1f}s before retry "
+                  f"(attempt {attempt + 1}/{max_retries})...{C.RESET}")
+            time.sleep(delay)
+
+        except Exception as e:
+            spinner.stop()
+            raise e
+
+    raise RuntimeError(f"Failed after {max_retries} retries due to rate limiting.")
+    # remove the bare "return" that was here
 
 def run_tandem(user_task: str, max_turns: int = 8) -> str:
     print_header(user_task)
@@ -260,7 +275,7 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
             print_done(agent_name, time.time() - session_start, turn)
             break
 
-        time.sleep(0.5)
+        time.sleep(3)
     else:
         print(f"\n{C.YELLOW}  Reached max turns ({max_turns}) without DONE signal.{C.RESET}\n")
 
