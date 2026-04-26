@@ -1,5 +1,7 @@
 import dotenv
 import os
+import openai
+import random
 from openai import OpenAI
 import time
 import threading
@@ -7,7 +9,6 @@ import sys
 import argparse
 import subprocess
 import re
-from pyexpat.errors import messages
 
 parser = argparse.ArgumentParser(description="Tandem agentic AI operations.")
 
@@ -19,41 +20,45 @@ args = parser.parse_args()
 max_turns = args.max_turns
 task = args.task
 
-if os.path.exists("task"): ## allow user to pass through files for longer or more complex tasks.
+if os.path.exists("task"):  ## allow user to pass through files for longer or more complex tasks.
     with open("task", "r") as f:
         task = f.read().strip()
-else: pass
 
 dotenv.load_dotenv()
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
 
-client = OpenAI(base_url="https://integrate.api.nvidia.com/v1",
-                api_key=NVIDIA_API_KEY
+client = OpenAI(
+    base_url="https://integrate.api.nvidia.com/v1",
+    api_key=NVIDIA_API_KEY
 )
+
 STEP_FLASH = "stepfun-ai/step-3.5-flash"
 QWEN_CODER = "qwen/qwen3-coder-480b-a35b-instruct"
 
-# Colors for linux terminal
+# ── Colors for linux terminal ─────────────────────────────────────────────────
+
 class C:
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    CYAN = "\033[36m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    BLUE = "\033[34m"
-    RED = "\033[31m"
-    MAGENTA = "\033[35m"
+    RESET     = "\033[0m"
+    BOLD      = "\033[1m"
+    DIM       = "\033[2m"
+    CYAN      = "\033[36m"
+    GREEN     = "\033[92m"
+    YELLOW    = "\033[93m"
+    BLUE      = "\033[34m"
+    RED       = "\033[31m"
+    MAGENTA   = "\033[35m"
     UNDERLINE = "\033[4m"
+
+# ── Spinner ───────────────────────────────────────────────────────────────────
 
 class Spinner:
     FRAMES = ["⣾", "⣷", "⣯", "⣟", "⣻", "⣽", "⣾", "⣷"]
 
     def __init__(self, agent_name: str, model_short: str):
-        self.agent_name = agent_name
+        self.agent_name  = agent_name
         self.model_short = model_short
         self._stop_event = threading.Event()
-        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread     = threading.Thread(target=self._spin, daemon=True)
         self._start_time = None
 
     def start(self):
@@ -68,26 +73,27 @@ class Spinner:
 
     def _spin(self):
         i = 0
-        color = C.CYAN if not self.agent_name == "PLANNER" else C.MAGENTA
+        color = C.CYAN if self.agent_name == "PLANNER" else C.MAGENTA
         while not self._stop_event.is_set():
             elapsed = time.time() - self._start_time
-            frame = self.FRAMES[i % len(self.FRAMES)]
+            frame   = self.FRAMES[i % len(self.FRAMES)]
             sys.stdout.write(
-                f"\r {color}{frame} {self.agent_name}{C.RESET}\n"
+                f"\r  {color}{frame} {self.agent_name}{C.RESET}"
                 f"{C.DIM} ({self.model_short}) - thinking... {elapsed:.1f}s{C.RESET}"
             )
             sys.stdout.flush()
             i += 1
             time.sleep(0.1)
-# status banners
+
+# ── Status banners ────────────────────────────────────────────────────────────
 
 def print_header(task: str):
     width = 62
     print(f"\n{C.BOLD}{'━' * width}{C.RESET}")
-    print(f"{C.BOLD} TWO-AGENT TANDEM SESSION{C.RESET}")
+    print(f"{C.BOLD}  TWO-AGENT TANDEM SESSION{C.RESET}")
     print(f"{'━' * width}")
     print(f"   {C.DIM}Task:{C.RESET} {task[:width - 8]}")
-    print(f"   {C.DIM}Agents:{C.RESET} PLANNER (Step 3.5 Flash)    *    CODER (Qwen3 480B")
+    print(f"   {C.DIM}Agents:{C.RESET} PLANNER (Step 3.5 Flash)  *  CODER (Qwen3 480B)")
     print(f"{'━' * width}\n")
 
 def print_turn_banner(turn: int, agent_name: str, max_turns: int):
@@ -97,10 +103,10 @@ def print_turn_banner(turn: int, agent_name: str, max_turns: int):
     print(f"{color}{'-' * 62}{C.RESET}")
 
 def print_response(agent_name: str, response: str):
-    color = C.CYAN if agent_name == "PLANNER" else C.MAGENTA
-    label = f"{color}{C.BOLD}[{agent_name}]{C.RESET}"
+    color  = C.CYAN if agent_name == "PLANNER" else C.MAGENTA
+    label  = f"{color}{C.BOLD}[{agent_name}]{C.RESET}"
     indent = " " * (len(agent_name) + 3)
-    lines =response.strip().splitlines()
+    lines  = response.strip().splitlines()
     for i, line in enumerate(lines):
         prefix = label if i == 0 else indent
         print(f"   {prefix}{line}")
@@ -117,23 +123,26 @@ def print_turn_timing(agent_name: str, elapsed: float):
     color = C.CYAN if agent_name == "PLANNER" else C.MAGENTA
     print(f"\n{color}{C.DIM} ↳ {agent_name} responded in {elapsed:.1f}s{C.RESET}")
 
-# system prompts
+# ── System prompts ────────────────────────────────────────────────────────────
 
 TOOL_INSTRUCTIONS = """
-You have access to a tool to run commands on a Raspberry Pi Zero W 2. You can use any shell command you may need.
-To use it, emit a command block exactly like this on its own line:
+You have access to a tool to run shell commands directly on the device this script is running on.
+To use it, emit a command on its own line in EXACTLY this format:
 
 RUN: <shell command here>
 
 Examples:
-RUN: ls /home/pi
+RUN: ls /home/qwen-agent
+RUN: mkdir -p /home/qwen-agent/workspace
 RUN: cat /var/log/syslog | tail -20
 RUN: pip3 install watchdog
 
-You will receive the output in the next turn. Only emit one RUN: at a time.
-Wait for the result before issuing the next command. If you create a new directory and/or file, always mention it somewhere in your completion summary. 
-You must run commands exactly like this or it will not work
-So do it.
+Rules:
+- Only ONE RUN: per response. Stop after issuing it and wait for TOOL OUTPUT.
+- Do not wrap commands in backticks or code blocks — plain text after RUN: only.
+- Always use absolute paths.
+- You MUST actually run commands to create files and folders. Do not just describe what you would do.
+- If you create a file or directory, mention it in your summary.
 """
 
 PLANNER_SYSTEM = """You are PLANNER, a senior software architect collaborating
@@ -160,24 +169,32 @@ You can see everything PLANNER writes in real time. Your job is to:
 
 Return complete, runnable code. PLANNER is watching.""" + TOOL_INSTRUCTIONS
 
+# ── Command execution ─────────────────────────────────────────────────────────
 
 BLOCKED = ["rm -rf", "mkfs", "dd if=", "shutdown", "reboot", "> /dev/sd"]
 
 def run_command(command: str) -> str:
     if any(bad in command for bad in BLOCKED):
-        return f"BLOCKED: command contains a disallowed pattern."
-    result = subprocess.run(
-        command,
-        shell=True,
-        capture_output=True,
-        text=True,
-        timeout=30
-    )
-    return result.stdout if result.stdout else result.stderr
-
-import re
+        return "BLOCKED: command contains a disallowed pattern."
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        output = result.stdout if result.stdout else result.stderr
+        return output if output else "(command ran with no output)"
+    except subprocess.TimeoutExpired:
+        return "ERROR: command timed out after 30 seconds."
+    except Exception as e:
+        return f"ERROR: {e}"
 
 def handle_tool_calls(response: str) -> str:
+    if not response:
+        return "[No response received from agent]"
+
     match = re.search(r"^RUN:\s*(.+)$", response, re.MULTILINE)
     if not match:
         return response
@@ -185,20 +202,17 @@ def handle_tool_calls(response: str) -> str:
     command = match.group(1).strip()
     print(f"\n  {C.YELLOW}⚙ Executing:{C.RESET} {command}")
 
-    try:
-        result = run_command(command)
-        print(f"  {C.DIM}→ {result.strip()[:200]}{C.RESET}")
-    except Exception as e:
-        result = f"ERROR: {e}"
-        print(f"  {C.RED}→ {result}{C.RESET}")
+    result = run_command(command)
+    print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
 
     return response + f"\n\nTOOL OUTPUT:\n{result}"
 
+# ── Agent call with retry ─────────────────────────────────────────────────────
 
 def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=4096) -> str:
     system      = PLANNER_SYSTEM if agent_name == "PLANNER" else CODER_SYSTEM
     model_short = "Step-Flash" if agent_name == "PLANNER" else "Qwen3-480B"
-    msg_list    = [{"role": "system", "content": system}] + shared_history  # renamed
+    msg_list    = [{"role": "system", "content": system}] + shared_history
 
     max_retries = 5
     base_delay  = 5
@@ -209,15 +223,18 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=409
         t0 = time.time()
 
         try:
-            response = client.chat.completions.create(
+            resp = client.chat.completions.create(
                 model=model,
-                messages=msg_list,                        # renamed
+                messages=msg_list,
                 max_tokens=max_tokens,
                 temperature=0.7,
             )
             spinner.stop()
             print_turn_timing(agent_name, time.time() - t0)
-            return response.choices[0].message.content
+            content = resp.choices[0].message.content
+            if not content:
+                return "[Agent returned empty response]"
+            return content
 
         except openai.RateLimitError:
             spinner.stop()
@@ -231,7 +248,8 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=409
             raise e
 
     raise RuntimeError(f"Failed after {max_retries} retries due to rate limiting.")
-    # remove the bare "return" that was here
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
 
 def run_tandem(user_task: str, max_turns: int = 8) -> str:
     print_header(user_task)
@@ -239,12 +257,12 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
     shared_history = [
         {
             "role": "user",
-            "content": f"Task: {user_task}\n\nPLANNER, please start."
+            "content": f"Task: {user_task}\n\nPLANNER, please start by issuing your first RUN: command."
         }
     ]
 
-    agents       = [("PLANNER", STEP_FLASH), ("CODER", QWEN_CODER)]
-    last_output  = ""
+    agents        = [("PLANNER", STEP_FLASH), ("CODER", QWEN_CODER)]
+    last_output   = ""
     session_start = time.time()
 
     for turn in range(1, max_turns + 1):
