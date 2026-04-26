@@ -131,7 +131,9 @@ RUN: cat /var/log/syslog | tail -20
 RUN: pip3 install watchdog
 
 You will receive the output in the next turn. Only emit one RUN: at a time.
-Wait for the result before issuing the next command. If you create a new directory and/or file, always mention it somewhere in your completion summary.
+Wait for the result before issuing the next command. If you create a new directory and/or file, always mention it somewhere in your completion summary. 
+You must run commands exactly like this or it will not work
+So do it.
 """
 
 PLANNER_SYSTEM = """You are PLANNER, a senior software architect collaborating
