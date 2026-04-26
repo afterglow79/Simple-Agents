@@ -120,7 +120,7 @@ def print_turn_timing(agent_name: str, elapsed: float):
 # system prompts
 
 TOOL_INSTRUCTIONS = """
-You have access to a tool to run commands on a Raspberry Pi Zero W 2.
+You have access to a tool to run commands on a Raspberry Pi Zero W 2. You can use any shell command you may need.
 To use it, emit a command block exactly like this on its own line:
 
 RUN: <shell command here>
@@ -131,7 +131,7 @@ RUN: cat /var/log/syslog | tail -20
 RUN: pip3 install watchdog
 
 You will receive the output in the next turn. Only emit one RUN: at a time.
-Wait for the result before issuing the next command.
+Wait for the result before issuing the next command. If you create a new directory and/or file, always mention it somewhere in your completion summary.
 """
 
 PLANNER_SYSTEM = """You are PLANNER, a senior software architect collaborating
@@ -144,7 +144,7 @@ You can see everything CODER writes in real time. Your job is to:
 - Update the plan if CODER's implementation reveals a better approach
 - Signal completion by writing: DONE: <short summary>
 
-Be concise. CODER is watching."""
+Be concise. CODER is watching.""" + TOOL_INSTRUCTIONS
 
 CODER_SYSTEM = """You are CODER, an expert software engineer collaborating
 with PLANNER (a software architect) in a shared workspace.
@@ -156,18 +156,14 @@ You can see everything PLANNER writes in real time. Your job is to:
 - Update your code when PLANNER spots issues
 - Signal completion by writing: DONE: <short summary>
 
-Return complete, runnable code. PLANNER is watching."""
+Return complete, runnable code. PLANNER is watching.""" + TOOL_INSTRUCTIONS
 
 
 BLOCKED = ["rm -rf", "mkfs", "dd if=", "shutdown", "reboot", "> /dev/sd"]
 
 def run_command(command: str) -> str:
-    """Run a shell command locally on the Pi and return the output."""
-
     if any(bad in command for bad in BLOCKED):
         return f"BLOCKED: command contains a disallowed pattern."
-
-
     result = subprocess.run(
         command,
         shell=True,
@@ -177,28 +173,24 @@ def run_command(command: str) -> str:
     )
     return result.stdout if result.stdout else result.stderr
 
+import re
+
 def handle_tool_calls(response: str) -> str:
-    """
-    Finds any RUN: line in the agent's response, executes it on the Pi,
-    and appends the result so the next agent sees it.
-    """
     match = re.search(r"^RUN:\s*(.+)$", response, re.MULTILINE)
     if not match:
-        return response  # no tool call, pass through as-is
+        return response
 
     command = match.group(1).strip()
-    print(f"\n  {C.YELLOW}⚙ Executing on Pi:{C.RESET} {command}")
+    print(f"\n  {C.YELLOW}⚙ Executing:{C.RESET} {command}")
 
     try:
         result = run_command(command)
-        print(f"  {C.DIM}→ {result.strip()[:200]}{C.RESET}")  # preview in terminal
+        print(f"  {C.DIM}→ {result.strip()[:200]}{C.RESET}")
     except Exception as e:
         result = f"ERROR: {e}"
         print(f"  {C.RED}→ {result}{C.RESET}")
 
-    # Append the result so the next agent sees what happened
     return response + f"\n\nTOOL OUTPUT:\n{result}"
-
 
 
 def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=4096) -> str:
