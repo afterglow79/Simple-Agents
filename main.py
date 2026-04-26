@@ -147,9 +147,10 @@ Rules:
 - If you create a file or directory, mention it in your summary.
 - Before saying DONE, you must RUN: ls -la on every directory you created 
   and confirm files have non-zero sizes. If anything is missing, keep going.
-- You can actually write code via ``RUN: cat > /home/qwen-agent/qwen-root/Simple-Agents/file_organizer/main.py << 'EOF'
-  # actual code here
-  EOF``
+- To write files, use: RUN: python3 -c "open('/absolute/path/file.py','w').write('''content here''')"
+- Do NOT use heredoc (<<EOF) syntax — it will not work.
+- After writing any file, verify with: RUN: ls -la /path/to/file.py
+- Each RUN: must be a single line. No multi-line commands.
 """
 
 PLANNER_SYSTEM = """You are PLANNER, a senior software architect collaborating
@@ -202,17 +203,19 @@ def handle_tool_calls(response: str) -> str:
     if not response:
         return "[No response received from agent]"
 
-    match = re.search(r"^RUN:\s*(.+)$", response, re.MULTILINE)
-    if not match:
+    matches = re.findall(r"^RUN:\s*(.+)$", response, re.MULTILINE)
+    if not matches:
         return response
 
-    command = match.group(1).strip()
-    print(f"\n  {C.YELLOW}⚙ Executing:{C.RESET} {command}")
+    tool_outputs = []
+    for command in matches:
+        command = command.strip()
+        print(f"\n  {C.YELLOW}⚙ Executing:{C.RESET} {command}")
+        result = run_command(command)
+        print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
+        tool_outputs.append(f"$ {command}\n{result}")
 
-    result = run_command(command)
-    print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
-
-    return response + f"\n\nTOOL OUTPUT:\n{result}"
+    return response + "\n\nTOOL OUTPUT:\n" + "\n---\n".join(tool_outputs)
 
 # ── Agent call with retry ─────────────────────────────────────────────────────
 
