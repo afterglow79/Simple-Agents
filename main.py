@@ -145,6 +145,11 @@ Rules:
 - Always use absolute paths.
 - You MUST actually run commands to create files and folders. Do not just describe what you would do.
 - If you create a file or directory, mention it in your summary.
+- Before saying DONE, you must RUN: ls -la on every directory you created 
+  and confirm files have non-zero sizes. If anything is missing, keep going.
+- You can actually write code via ``RUN: cat > /home/qwen-agent/qwen-root/Simple-Agents/file_organizer/main.py << 'EOF'
+  # actual code here
+  EOF``
 """
 
 PLANNER_SYSTEM = """You are PLANNER, a senior software architect collaborating
