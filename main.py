@@ -20,8 +20,8 @@ args = parser.parse_args()
 max_turns = args.max_turns
 task = args.task
 
-if os.path.exists("task"):  ## allow user to pass through files for longer or more complex tasks.
-    with open("task", "r") as f:
+if os.path.exists(task):  ## allow user to pass through files for longer or more complex tasks.
+    with open(task, "r") as f:
         task = f.read().strip()
 
 dotenv.load_dotenv()
