@@ -11,8 +11,8 @@ from pyexpat.errors import messages
 
 parser = argparse.ArgumentParser(description="Tandem agentic AI operations.")
 
-parser.add_argument("max_turns", type=int)
-parser.add_argument("task", type=str)
+parser.add_argument("--max_turns", type=int, default=8)
+parser.add_argument("--task", type=str)
 
 args = parser.parse_args()
 
