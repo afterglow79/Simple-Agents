@@ -24,6 +24,8 @@ if os.path.exists(task):  ## allow user to pass through files for longer or more
     with open(task, "r") as f:
         task = f.read().strip()
 
+print(f"Prompt is: {task}")
+
 dotenv.load_dotenv()
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
 
