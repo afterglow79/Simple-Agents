@@ -52,13 +52,11 @@ class C:
     BOLD = "\033[1m"
     DIM = "\033[2m"
     CYAN = "\033[36m"
-    BCYAN = "\033[96m"
     GREEN = "\033[92m"
     YELLOW = "\033[93m"
     BLUE = "\033[34m"
     RED = "\033[31m"
     MAGENTA = "\033[35m"
-    BMAGENTA = "\033[95"
     UNDERLINE = "\033[4m"
 
 
@@ -91,15 +89,7 @@ class Spinner:
 
     def _spin(self):
         i = 0
-        if self.agent_name == "PLANNER":
-            color = C.CYAN
-        elif self.agent_name == "PLANNER2":
-            color = C.BCYAN
-        elif self.agent_name == "CODER":
-            color = C.MAGENTA
-        elif self.agent_name == "CODER2":
-            color = C.BMAGENTA
-
+        color = C.CYAN if self.agent_name == "PLANNER" else C.MAGENTA
         while not self._stop_event.is_set():
             elapsed = time.time() - self._start_time
             frame = self.FRAMES[i % len(self.FRAMES)]
@@ -231,7 +221,7 @@ CRITICAL RULES — FOLLOW EVERY ONE:
    If you run a command, you must read the output and confirm it did what you expected
    If you write a python script, you must run it to confirm it does exactly what you expect. You can hook deep into the system if you need to read specific things.
 
-10. YOU MAY NOT, EVER, UNDER ANY CIRCUMSTANCE, READ OR MODIFY ANYTHING AT THE PATH "~/qwen-root/Simple-Agents"
+10. YOU MAY NOT, EVER, UNDER ANY CIRCUMSTANCE, READ OR MODIFY ANYTHING AT THE PATH "home/qwen-agent/qwen-root/Simple-Agents"
 """
 
 PLANNER_SYSTEM = """You are PLANNER, a senior software architect working alongside CODER
@@ -485,15 +475,15 @@ def read_b64(path):
 # noinspection PyTypeChecker
 def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=16384) -> str:
     agent_config = {
-        "PLANNER":  ("Gemma",           PLANNER_SYSTEM),
-        "CODER":    ("Qwen3-480B",      CODER_SYSTEM),
-        "PLANNER2": ("GLM-5.1",         SECOND_PLANNER_SYSTEM),
-        "CODER2":   ("Deepseek V4 Flash", SECOND_CODER_SYSTEM),
+        "PLANNER": ("Gemma", PLANNER_SYSTEM),
+        "CODER": ("Qwen3-480B", CODER_SYSTEM),
+        "PLANNER2": ("GLM-5.1", SECOND_PLANNER_SYSTEM),
+        "CODER1": ("Qwen3-480B", CODER_SYSTEM),
+        "CODER2": ("Deepseek V4 Flash", SECOND_CODER_SYSTEM),
     }
     if agent_name not in agent_config:
         raise ValueError(f"Unknown agent name: '{agent_name}'. Expected one of: {list(agent_config.keys())}")
     model_short, system = agent_config[agent_name]
-
 
     msg_list = [{"role": "system", "content": system}] + shared_history
 
@@ -506,7 +496,16 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
         t0 = time.time()
 
         try:
-            if model_short == "GLM-5.1":  ## GLM uses a different setup
+            content_parts = []
+            first_chunk_seen = [False]
+
+            def stop_spinner_once():
+                if not first_chunk_seen[0]:
+                    first_chunk_seen[0] = True
+                    spinner.stop()
+                    print_turn_timing(agent_name, time.time() - t0)
+
+            if model_short == "GLM-5.1":
                 completion = client.chat.completions.create(
                     model="z-ai/glm-5.1",
                     messages=msg_list,
@@ -514,93 +513,90 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                     top_p=1,
                     max_tokens=16384,
                     extra_body={"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}},
-                    stream=True
+                    stream=True,
                 )
-                spinner.stop()
-                print_turn_timing(agent_name, time.time() - t0)
-                content_parts = []
                 for chunk in completion:
-                    if not getattr(chunk, "choices", None):
+                    stop_spinner_once()
+                    if not getattr(chunk, "choices", None) or len(chunk.choices) == 0:
                         continue
-                    if len(chunk.choices) == 0 or getattr(chunk.choices[0], "delta", None) is None:
+                    delta = getattr(chunk.choices[0], "delta", None)
+                    if delta is None:
                         continue
-                    delta = chunk.choices[0].delta
                     reasoning = getattr(delta, "reasoning_content", None)
                     if reasoning:
                         print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
                     if getattr(delta, "content", None) is not None:
                         print(delta.content, end="", flush=True)
                         content_parts.append(delta.content)
-                print()  # newline after streamed output
-                content = "".join(content_parts)
+                stop_spinner_once()
+                print()
 
             elif model_short == "Gemma":
-                # FIX 1: Define stream before using it in headers
-                stream = True
                 headers = {
                     "Authorization": f"Bearer {NVIDIA_API_KEY}",
-                    "Accept": "text/event-stream" if stream else "application/json"
+                    "Accept": "text/event-stream",
                 }
-
-                # FIX 2: Pass msg_list directly as messages (not nested under a single user message)
                 payload = {
                     "model": "google/gemma-4-31b-it",
                     "messages": msg_list,
                     "max_tokens": max_tokens,
                     "temperature": 1.00,
                     "top_p": 0.95,
-                    "stream": stream,
+                    "stream": True,
                     "chat_template_kwargs": {"enable_thinking": True},
                 }
-                spinner.stop()
-                print_turn_timing(agent_name, time.time() - t0)  # FIX 3: added missing timing print
-                content_parts = []
-                response = requests.post(invoke_url, headers=headers, json=payload, stream=stream)
-                if stream:
-                    for line in response.iter_lines():
-                        if line:
-                            decoded = line.decode("utf-8")
-                            # FIX 4: Parse SSE lines to extract actual content delta
-                            if decoded.startswith("data: "):
-                                data_str = decoded[len("data: "):]
-                                if data_str.strip() == "[DONE]":
-                                    break
-                                try:
-                                    data_json = json.loads(data_str)
-                                    delta_content = (
-                                        data_json.get("choices", [{}])[0]
-                                        .get("delta", {})
-                                        .get("content", None)
-                                    )
-                                    if delta_content:
-                                        print(delta_content, end="", flush=True)
-                                        content_parts.append(delta_content)
-                                except json.JSONDecodeError:
-                                    pass
-                else:
-                    resp_json = response.json()
-                    print(resp_json)
-                    content_parts.append(
-                        resp_json.get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content", "")
-                    )
-                print()  # newline after streamed output
-                content = "".join(content_parts)
+                response = requests.post(invoke_url, headers=headers, json=payload, stream=True)
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    stop_spinner_once()
+                    decoded = line.decode("utf-8")
+                    if not decoded.startswith("data: "):
+                        continue
+                    data_str = decoded[len("data: "):]
+                    if data_str.strip() == "[DONE]":
+                        break
+                    try:
+                        data_json = json.loads(data_str)
+                        delta = data_json.get("choices", [{}])[0].get("delta", {})
+                        reasoning = delta.get("reasoning_content") or delta.get("thinking")
+                        text = delta.get("content")
+                        if reasoning:
+                            print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
+                        if text:
+                            print(text, end="", flush=True)
+                            content_parts.append(text)
+                    except json.JSONDecodeError as e:
+                        print(f"\n{C.RED}[Gemma parse error: {e}] raw: {decoded[:200]}{C.RESET}", file=sys.stderr)
+                stop_spinner_once()
+                print()
 
             elif model_short == "Qwen3-480B":
-                resp = client.chat.completions.create(
+                completion = client.chat.completions.create(
                     model=model,
                     messages=msg_list,
                     max_tokens=max_tokens,
                     temperature=0.7,
+                    stream=True,
                 )
-                spinner.stop()
-                print_turn_timing(agent_name, time.time() - t0)
-                content = resp.choices[0].message.content
+                for chunk in completion:
+                    stop_spinner_once()
+                    if not getattr(chunk, "choices", None) or len(chunk.choices) == 0:
+                        continue
+                    delta = getattr(chunk.choices[0], "delta", None)
+                    if delta is None:
+                        continue
+                    reasoning = getattr(delta, "reasoning_content", None)
+                    if reasoning:
+                        print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
+                    if getattr(delta, "content", None) is not None:
+                        print(delta.content, end="", flush=True)
+                        content_parts.append(delta.content)
+                stop_spinner_once()
+                print()
 
             elif model_short == "Deepseek V4 Flash":
-                # FIX 5: Use the `model` parameter passed in, not a hardcoded string
                 completion = client.chat.completions.create(
                     model=model,
                     messages=msg_list,
@@ -608,27 +604,27 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                     top_p=0.95,
                     max_tokens=16384,
                     extra_body={"chat_template_kwargs": {"thinking": True, "reasoning_effort": "max"}},
-                    stream=True
+                    stream=True,
                 )
-                spinner.stop()
-                print_turn_timing(agent_name, time.time() - t0)
-                content_parts = []
                 for chunk in completion:
-                    if not getattr(chunk, "choices", None):
+                    stop_spinner_once()
+                    if not getattr(chunk, "choices", None) or len(chunk.choices) == 0:
                         continue
-                    if len(chunk.choices) == 0 or getattr(chunk.choices[0], "delta", None) is None:
+                    delta = getattr(chunk.choices[0], "delta", None)
+                    if delta is None:
                         continue
-                    delta = chunk.choices[0].delta
                     reasoning = getattr(delta, "reasoning", None) or getattr(delta, "reasoning_content", None)
                     if reasoning:
                         print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
                     if getattr(delta, "content", None) is not None:
                         print(delta.content, end="", flush=True)
                         content_parts.append(delta.content)
-                print()  # newline after streamed output
-                content = "".join(content_parts)
+                stop_spinner_once()
+                print()
 
+            content = "".join(content_parts)
             if not content:
+                print(f"{C.RED}[{agent_name}] returned empty content.{C.RESET}", file=sys.stderr)
                 return "[Agent returned empty response]"
             return content
 
@@ -641,7 +637,7 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
 
         except Exception as e:
             spinner.stop()
-            raise e
+            raise
 
     raise RuntimeError(f"Failed after {max_retries} retries due to rate limiting.")
 
