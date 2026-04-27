@@ -542,61 +542,61 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
 
 
 
-            #Gemma is fucked. Can't fix it rn. Working with one planner and two
-            # ### GEMMA
-            # elif model_short == "Gemma":
-            #     # Exactly the NVIDIA sample pattern, adapted to collect content
-            #     gemma_stream = False
-            #     gemma_headers = {
-            #         "Authorization": f"Bearer {NVIDIA_API_KEY}",
-            #         "Accept": "text/event-stream" if gemma_stream else "application/json",
-            #     }
-            #     payload = {
-            #         "model": "google/gemma-4-31b-it",
-            #         "messages": msg_list,
-            #         "max_tokens": max_tokens,
-            #         "temperature": 1.00,
-            #         "top_p": 0.95,
-            #         "stream": gemma_stream,
-            #         "chat_template_kwargs": {"enable_thinking": False},
-            #     }
-            #     response = requests.post(invoke_url, headers=gemma_headers, json=payload, stream=gemma_stream)
-            #     if gemma_stream:
-            #         for line in response.iter_lines():
-            #             if line:
-            #                 stop_spinner_once()
-            #                 decoded = line.decode("utf-8")
-            #                 # print raw so it's always visible regardless of parse result
-            #                 print(decoded, flush=True)
-            #                 # also try to extract and collect just the text delta
-            #                 if decoded.startswith("data: "):
-            #                     data_str = decoded[len("data: "):]
-            #                     if data_str.strip() != "[DONE]":
-            #                         try:
-            #                             delta = json.loads(data_str).get("choices", [{}])[0].get("delta", {})
-            #                             text = delta.get("content") or delta.get("text") or delta.get("message")
-            #                             if text:
-            #                                 content_parts.append(text)
-            #                         except json.JSONDecodeError:
-            #                             pass
-            #     else:
-            #         resp_json = response.json()
-            #         stop_spinner_once()
-            #         print()
-            #         # Parse message content from response
-            #         try:
-            #             choices = resp_json.get("choices", [])
-            #             if choices and len(choices) > 0:
-            #                 msg = choices[0].get("message", {})
-            #                 content = msg.get("content", "")
-            #                 if content:
-            #                     content_parts.append(content)
-            #                     print(content)
-            #         except (KeyError, TypeError, AttributeError):
-            #             pass
+            #Gemma is fucked. Can't fix it rn. Working with one planner and two coders
+            ### GEMMA
+            elif model_short == "Gemma":
+                # Exactly the NVIDIA sample pattern, adapted to collect content
+                gemma_stream = False
+                gemma_headers = {
+                    "Authorization": f"Bearer {NVIDIA_API_KEY}",
+                    "Accept": "text/event-stream" if gemma_stream else "application/json",
+                }
+                payload = {
+                    "model": "google/gemma-4-31b-it",
+                    "messages": msg_list,
+                    "max_tokens": max_tokens,
+                    "temperature": 1.00,
+                    "top_p": 0.95,
+                    "stream": gemma_stream,
+                    "chat_template_kwargs": {"enable_thinking": False},
+                }
+                response = requests.post(invoke_url, headers=gemma_headers, json=payload, stream=gemma_stream)
+                if gemma_stream:
+                    for line in response.iter_lines():
+                        if line:
+                            stop_spinner_once()
+                            decoded = line.decode("utf-8")
+                            # print raw so it's always visible regardless of parse result
+                            print(decoded, flush=True)
+                            # also try to extract and collect just the text delta
+                            if decoded.startswith("data: "):
+                                data_str = decoded[len("data: "):]
+                                if data_str.strip() != "[DONE]":
+                                    try:
+                                        delta = json.loads(data_str).get("choices", [{}])[0].get("delta", {})
+                                        text = delta.get("content") or delta.get("text") or delta.get("message")
+                                        if text:
+                                            content_parts.append(text)
+                                    except json.JSONDecodeError:
+                                        pass
+                else:
+                    resp_json = response.json()
+                    stop_spinner_once()
+                    print()
+                    # Parse message content from response
+                    try:
+                        choices = resp_json.get("choices", [])
+                        if choices and len(choices) > 0:
+                            msg = choices[0].get("message", {})
+                            content = msg.get("content", "")
+                            if content:
+                                content_parts.append(content)
+                                print(content)
+                    except (KeyError, TypeError, AttributeError):
+                        pass
 
-#                 stop_spinner_once()
-#                 print()
+                stop_spinner_once()
+                print()
 
 
 
@@ -690,8 +690,11 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
         }
     ]
 
-    # FIX 6: Use the DEEPSEEK constant instead of a raw string for CODER2's model
-    agents = [("PLANNER", GEMMA), ("CODER", QWEN_CODER), ("PLANNER2", GLM), ("CODER2", DEEPSEEK)]
+
+    #agents = [("PLANNER", GEMMA), ("CODER", QWEN_CODER), ("PLANNER2", GLM), ("CODER2", DEEPSEEK)]
+    # Skip broken Gemma; use only GLM, Qwen, and DeepSeek
+    agents = [("CODER", QWEN_CODER), ("PLANNER2", GLM), ("CODER2", DEEPSEEK)]
+
     last_output = ""
     session_start = time.time()
 
