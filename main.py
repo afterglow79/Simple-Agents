@@ -556,8 +556,6 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                         continue
                     if line:
                         print(line.decode("utf-8"))
-
-                    stop_spinner_once()
                     decoded = line.decode("utf-8")
                     if not decoded.startswith("data: "):
                         continue
