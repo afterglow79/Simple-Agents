@@ -484,23 +484,16 @@ def read_b64(path):
 
 # noinspection PyTypeChecker
 def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=16384) -> str:
-    system = PLANNER_SYSTEM if agent_name == "PLANNER" else CODER_SYSTEM
-    model_short = "GLM-5.1" if agent_name == "PLANNER" else "Qwen3-480B"
-    if agent_name == "PLANNER2":
-        model_short = "GLM-5.1"
-        system = SECOND_PLANNER_SYSTEM
+    agent_config = {
+        "PLANNER":  ("Gemma",           PLANNER_SYSTEM),
+        "CODER":    ("Qwen3-480B",      CODER_SYSTEM),
+        "PLANNER2": ("GLM-5.1",         SECOND_PLANNER_SYSTEM),
+        "CODER2":   ("Deepseek V4 Flash", SECOND_CODER_SYSTEM),
+    }
+    if agent_name not in agent_config:
+        raise ValueError(f"Unknown agent name: '{agent_name}'. Expected one of: {list(agent_config.keys())}")
+    model_short, system = agent_config[agent_name]
 
-    elif agent_name == "CODER1":
-        model_short = "Qwen3-480B"
-        system = CODER_SYSTEM
-
-    elif agent_name == "PLANNER":
-        model_short = "Gemma"
-        system = PLANNER_SYSTEM
-
-    elif agent_name == "CODER2":
-        model_short = "Deepseek V4 Flash"
-        system = SECOND_CODER_SYSTEM
 
     msg_list = [{"role": "system", "content": system}] + shared_history
 
