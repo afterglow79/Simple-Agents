@@ -16,13 +16,15 @@ import json
 
 parser = argparse.ArgumentParser(description="Tandem agentic AI operations.")
 
-parser.add_argument("--max_turns", type=int, default=8)
+parser.add_argument("--max_turns", type=int, default=25)
 parser.add_argument("--task", type=str)
+parser.add_argument("--init_planning_turns", type=int, default = 6)
 
 args = parser.parse_args()
 
 max_turns = args.max_turns
 task = args.task
+n_planning_turns = args.init_planning_turns
 
 if task and os.path.exists(task):  ## allow user to pass through files for longer or more complex tasks.
     with open(task, "r") as f:
@@ -148,7 +150,7 @@ def print_turn_timing(agent_name: str, elapsed: float):
 
 # ── System prompts ────────────────────────────────────────────────────────────
 
-TOOL_INSTRUCTIONS = """
+TOOL_INSTRUCTIONS = f"""
 ════════════════════════════════════════
 TOOL: SHELL COMMAND EXECUTION
 ════════════════════════════════════════
@@ -172,6 +174,9 @@ WRONG — DO NOT DO THESE:
   RUN: cat > file.py << EOF     <- heredocs DO NOT WORK, never use them
   RUN: mkdir foo                <- relative paths forbidden, always absolute
 
+  
+For the first {n_planning_turns} turns, only the PLANNERs can interact with each other. They will take this time to refine their plan fully, before delegating it off to the CODERs.
+
 ════════════════════════════════════════
 CRITICAL RULES — FOLLOW EVERY ONE:
 ════════════════════════════════════════
@@ -180,9 +185,10 @@ CRITICAL RULES — FOLLOW EVERY ONE:
    Issue exactly one RUN: command per response, then end your message.
    Wait for TOOL OUTPUT before doing anything else.
    Do not issue multiple RUN: lines. Do not plan ahead in the same message.
+   You can however RUN several commands at once via &&, if necessary. I.e `whoami && pwd``.
 
 2. ALWAYS USE ABSOLUTE PATHS.
-   Never use ~, ./, or relative paths. Always start paths with /home/qwen-agent/
+   Never use ~, ./, or relative paths.
 
 3. TO WRITE A PYTHON FILE use this pattern — everything on one line:
    RUN: python3 -c "open('/absolute/path/file.py','w').write('''line1\nline2\nline3''')"
@@ -221,7 +227,7 @@ CRITICAL RULES — FOLLOW EVERY ONE:
    If you run a command, you must read the output and confirm it did what you expected
    If you write a python script, you must run it to confirm it does exactly what you expect. You can hook deep into the system if you need to read specific things.
 
-10. *****YOU MAY NOT, EVER, UNDER ANY CIRCUMSTANCE, READ OR MODIFY ANYTHING AT THE PATH "home/qwen-agent/qwen-root/Simple-Agents"*****
+10. *****YOU MAY NOT, EVER, UNDER ANY CIRCUMSTANCE, READ OR MODIFY "prompt.txt" or "main.py" or "requirements.txt" or ".gitignore" or ".env" AT THE PATH "~/Simple-Agents"*****
 
 11. If one worker never replies, assume it does not exist. 
     If you are PLANNER and PLANNER2 doesn't reply, you are to split your plan into two parts. 
@@ -435,7 +441,7 @@ BLOCKED = ["rm -rf", "mkfs", "dd if=", "shutdown", "reboot", "> /dev/sd"]
 
 def run_command(command: str) -> str:
     if any(bad in command for bad in BLOCKED):
-        return "BLOCKED: command contains a disallowed pattern."
+        return f"BLOCKED: command contains a disallowed pattern. You cannot use {bad} in command {command}."
     try:
         result = subprocess.run(
             command,
@@ -481,11 +487,10 @@ def read_b64(path):
 # noinspection PyTypeChecker
 def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=16384) -> str:
     agent_config = {
-        "PLANNER": ("Gemma", PLANNER_SYSTEM),
-        "CODER": ("Qwen3-480B", CODER_SYSTEM),
+        "PLANNER": ("GLM-5.1", PLANNER_SYSTEM),
+        "CODER": ("GLM-5.1", CODER_SYSTEM),
         "PLANNER2": ("GLM-5.1", SECOND_PLANNER_SYSTEM),
-        "CODER1": ("Qwen3-480B", CODER_SYSTEM),
-        "CODER2": ("Deepseek V4 Flash", SECOND_CODER_SYSTEM),
+        "CODER2": ("GLM-5.1", SECOND_CODER_SYSTEM),
     }
     if agent_name not in agent_config:
         raise ValueError(f"Unknown agent name: '{agent_name}'. Expected one of: {list(agent_config.keys())}")
@@ -513,9 +518,9 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
 
 
             ### GLM
-            if model_short == "GLM-5.1":
+            if model_short in {"GLM-5.1", "GLM"}:
                 completion = client.chat.completions.create(
-                    model="z-ai/glm-5.1",
+                    model=model,
                     messages=msg_list,
                     temperature=1,
                     top_p=1,
@@ -653,6 +658,9 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                 stop_spinner_once()
                 print()
 
+            else:
+                raise ValueError(f"Unsupported model_short '{model_short}' for agent '{agent_name}'.")
+
             content = "".join(content_parts)
             if not content:
                 print(f"{C.RED}[{agent_name}] returned empty content.{C.RESET}", file=sys.stderr)
@@ -692,14 +700,19 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
 
 
     #agents = [("PLANNER", GEMMA), ("CODER", QWEN_CODER), ("PLANNER2", GLM), ("CODER2", DEEPSEEK)]
-    # Skip broken Gemma; use only GLM, Qwen, and DeepSeek
-    agents = [("PLANNER2", GLM), ("CODER", QWEN_CODER), ("CODER2", DEEPSEEK)]
+    # Skip broken Gemma; use only GLM
+    agents = [("PLANNER", GLM), ("PLANNER2", GLM), ("CODER", GLM), ("CODER2", GLM)]
 
     last_output = ""
     session_start = time.time()
 
     for turn in range(1, max_turns + 1):
-        agent_name, model = agents[(turn - 1) % 4]
+
+        if turn > n_planning_turns:  ## after the initial planning phase, all agents work together
+            agent_name, model = agents[(turn - 1) % 4]
+
+        elif turn < n_planning_turns: ## allow for planners to work together for a bit.
+            agent_name, model = agents[(turn - 1) % 2]
 
         print_turn_banner(turn, agent_name, max_turns)
 
@@ -708,7 +721,6 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
 
         print()
         print_response(agent_name, response)
-
         shared_history.append({
             "role": "assistant" if agent_name == "PLANNER" else "user",
             "content": f"[{agent_name}]: {response}"

@@ -1,1 +1,4 @@
 .env
+.venv
+alpaca_trader/
+prompt.txt
