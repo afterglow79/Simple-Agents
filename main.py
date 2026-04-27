@@ -3,6 +3,7 @@ import dotenv
 import os
 import openai
 import random
+import httpx
 
 import requests
 from openai import OpenAI
@@ -29,8 +30,6 @@ n_planning_turns = args.init_planning_turns
 if task and os.path.exists(task):  ## allow user to pass through files for longer or more complex tasks.
     with open(task, "r") as f:
         task = f.read().strip()
-
-print(f"Prompt is: {task}")
 
 dotenv.load_dotenv()
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
@@ -227,7 +226,8 @@ CRITICAL RULES — FOLLOW EVERY ONE:
    If you run a command, you must read the output and confirm it did what you expected
    If you write a python script, you must run it to confirm it does exactly what you expect. You can hook deep into the system if you need to read specific things.
 
-10. *****YOU MAY NOT, EVER, UNDER ANY CIRCUMSTANCE, READ OR MODIFY "prompt.txt" or "main.py" or "requirements.txt" or ".gitignore" or ".env" AT THE PATH "~/Simple-Agents"*****
+10. *****YOU MAY NOT, EVER, UNDER ANY CIRCUMSTANCE, READ OR MODIFY "prompt.txt" or "main.py" or "requirements.txt" or ".gitignore" or ".env" AT THE PATH "~/Simple-Agents".*****
+    You may make new directories within that directory and then files inside that subdirectory. Please edit .gitignore to include the new directory you have made (in the format "directoryname/"). This is the only time you may touch .gitignore. do not modify it in any other way.
 
 11. If one worker never replies, assume it does not exist. 
     If you are PLANNER and PLANNER2 doesn't reply, you are to split your plan into two parts. 
@@ -440,8 +440,9 @@ BLOCKED = ["rm -rf", "mkfs", "dd if=", "shutdown", "reboot", "> /dev/sd"]
 
 
 def run_command(command: str) -> str:
-    if any(bad in command for bad in BLOCKED):
-        return f"BLOCKED: command contains a disallowed pattern. You cannot use {bad} in command {command}."
+    blocked_pattern = next((pattern for pattern in BLOCKED if pattern in command), None)
+    if blocked_pattern:
+        return f"BLOCKED: command contains a disallowed pattern. You cannot use {blocked_pattern} in command {command}."
     try:
         result = subprocess.run(
             command,
@@ -674,11 +675,29 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                   f"(attempt {attempt + 1}/{max_retries})...{C.RESET}")
             time.sleep(delay)
 
+        except (
+                openai.APIConnectionError,
+                openai.APITimeoutError,
+                httpx.RemoteProtocolError,
+                httpx.ReadError,
+                httpx.ReadTimeout,
+                requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+        ) as e:
+            spinner.stop()
+            delay = base_delay * (2 ** attempt) + random.uniform(0, 2)
+            print(
+                f"\n  {C.YELLOW}⚠ Transient network/stream error: {type(e).__name__}: {e}.{C.RESET}\n"
+                f"  {C.YELLOW}Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})...{C.RESET}"
+            )
+            time.sleep(delay)
+
         except Exception as e:
             spinner.stop()
             raise
 
-    raise RuntimeError(f"Failed after {max_retries} retries due to rate limiting.")
+    raise RuntimeError(f"Failed after {max_retries} retries due to transient API/connection errors.")
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
@@ -723,7 +742,7 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
         print_response(agent_name, response)
         shared_history.append({
             "role": "assistant" if agent_name == "PLANNER" else "user",
-            "content": f"[{agent_name}]: {response}"
+            "content": f"[{agent_name}]: {response}, and that was turn number: {turn} / {max_turns}"
         })
 
         last_output = response
@@ -738,6 +757,8 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
 
     return last_output
 
+print("Starting!")
+print(f"Prompt is: {task}")
 
 run_tandem(
     user_task=task,
