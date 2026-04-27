@@ -505,6 +505,8 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                     spinner.stop()
                     print_turn_timing(agent_name, time.time() - t0)
 
+
+            ### GLM
             if model_short == "GLM-5.1":
                 completion = client.chat.completions.create(
                     model="z-ai/glm-5.1",
@@ -531,6 +533,8 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                 stop_spinner_once()
                 print()
 
+
+            ### GEMMA
             elif model_short == "Gemma":
                 headers = {
                     "Authorization": f"Bearer {NVIDIA_API_KEY}",
@@ -543,13 +547,16 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                     "temperature": 1.00,
                     "top_p": 0.95,
                     "stream": True,
-                    "chat_template_kwargs": {"enable_thinking": True},
+                    "chat_template_kwargs": {"enable_thinking": False},
                 }
                 response = requests.post(invoke_url, headers=headers, json=payload, stream=True)
                 response.raise_for_status()
                 for line in response.iter_lines():
                     if not line:
                         continue
+                    if line:
+                        print(line.decode("utf-8"))
+
                     stop_spinner_once()
                     decoded = line.decode("utf-8")
                     if not decoded.startswith("data: "):
@@ -572,6 +579,8 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                 stop_spinner_once()
                 print()
 
+
+            ### QWEN
             elif model_short == "Qwen3-480B":
                 completion = client.chat.completions.create(
                     model=model,
@@ -596,6 +605,8 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                 stop_spinner_once()
                 print()
 
+
+            ### DEEPSEEK
             elif model_short == "Deepseek V4 Flash":
                 completion = client.chat.completions.create(
                     model=model,
@@ -603,7 +614,7 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                     temperature=1,
                     top_p=0.95,
                     max_tokens=16384,
-                    extra_body={"chat_template_kwargs": {"thinking": True, "reasoning_effort": "max"}},
+                    extra_body={"chat_template_kwargs": {"thinking": True, "reasoning_effort": "high"}},
                     stream=True,
                 )
                 for chunk in completion:
