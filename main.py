@@ -520,12 +520,15 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
 
             ### GLM
             if model_short in {"GLM-5.1", "GLM"}:
+                # Use the caller-provided max_tokens (or the function default) instead of an
+                # extremely large constant (16384**2) which causes API errors. Some backends
+                # enforce a maximum total token limit; keep max_tokens reasonable.
                 completion = client.chat.completions.create(
                     model=model,
                     messages=msg_list,
                     temperature=1,
                     top_p=1,
-                    max_tokens=16384**2, ## we want lots of tokens
+                    max_tokens=max_tokens,
                     extra_body={"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}},
                     stream=True,
                 )
