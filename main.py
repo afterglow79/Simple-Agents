@@ -1,7 +1,10 @@
+import base64
 import dotenv
 import os
 import openai
 import random
+
+import requests
 from openai import OpenAI
 import time
 import threading
@@ -9,6 +12,7 @@ import sys
 import argparse
 import subprocess
 import re
+import json
 
 parser = argparse.ArgumentParser(description="Tandem agentic AI operations.")
 
@@ -33,23 +37,35 @@ client = OpenAI(
     base_url="https://integrate.api.nvidia.com/v1",
     api_key=NVIDIA_API_KEY
 )
+invoke_url = "https://integrate.api.nvidia.com/v1/chat/completions"
 
-STEP_FLASH = "stepfun-ai/step-3.5-flash"
+GLM = "z-ai/glm-5.1"
 QWEN_CODER = "qwen/qwen3-coder-480b-a35b-instruct"
+GEMMA = "google/gemma-4-31b-it"
+DEEPSEEK = "deepseek-ai/deepseek-v4-flash"
+
 
 # ── Colors for linux terminal ─────────────────────────────────────────────────
 
 class C:
-    RESET     = "\033[0m"
-    BOLD      = "\033[1m"
-    DIM       = "\033[2m"
-    CYAN      = "\033[36m"
-    GREEN     = "\033[92m"
-    YELLOW    = "\033[93m"
-    BLUE      = "\033[34m"
-    RED       = "\033[31m"
-    MAGENTA   = "\033[35m"
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    CYAN = "\033[36m"
+    BCYAN = "\033[96m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    BLUE = "\033[34m"
+    RED = "\033[31m"
+    MAGENTA = "\033[35m"
+    BMAGENTA = "\033[95"
     UNDERLINE = "\033[4m"
+
+
+_USE_COLOR = sys.stdout.isatty() and os.getenv("NO_COLOR") is None
+_REASONING_COLOR = "\033[90m" if _USE_COLOR else ""
+_RESET_COLOR = "\033[0m" if _USE_COLOR else ""
+
 
 # ── Spinner ───────────────────────────────────────────────────────────────────
 
@@ -57,10 +73,10 @@ class Spinner:
     FRAMES = ["⣾", "⣷", "⣯", "⣟", "⣻", "⣽", "⣾", "⣷"]
 
     def __init__(self, agent_name: str, model_short: str):
-        self.agent_name  = agent_name
+        self.agent_name = agent_name
         self.model_short = model_short
         self._stop_event = threading.Event()
-        self._thread     = threading.Thread(target=self._spin, daemon=True)
+        self._thread = threading.Thread(target=self._spin, daemon=True)
         self._start_time = None
 
     def start(self):
@@ -75,10 +91,18 @@ class Spinner:
 
     def _spin(self):
         i = 0
-        color = C.CYAN if self.agent_name == "PLANNER" else C.MAGENTA
+        if self.agent_name == "PLANNER":
+            color = C.CYAN
+        elif self.agent_name == "PLANNER2":
+            color = C.BCYAN
+        elif self.agent_name == "CODER":
+            color = C.MAGENTA
+        elif self.agent_name == "CODER2":
+            color = C.BMAGENTA
+
         while not self._stop_event.is_set():
             elapsed = time.time() - self._start_time
-            frame   = self.FRAMES[i % len(self.FRAMES)]
+            frame = self.FRAMES[i % len(self.FRAMES)]
             sys.stdout.write(
                 f"\r  {color}{frame} {self.agent_name}{C.RESET}"
                 f"{C.DIM} ({self.model_short}) - thinking... {elapsed:.1f}s{C.RESET}"
@@ -86,6 +110,7 @@ class Spinner:
             sys.stdout.flush()
             i += 1
             time.sleep(0.1)
+
 
 # ── Status banners ────────────────────────────────────────────────────────────
 
@@ -95,8 +120,10 @@ def print_header(task: str):
     print(f"{C.BOLD}  TWO-AGENT TANDEM SESSION{C.RESET}")
     print(f"{'━' * width}")
     print(f"   {C.DIM}Task:{C.RESET} {task[:width - 8]}")
-    print(f"   {C.DIM}Agents:{C.RESET} PLANNER (Step 3.5 Flash)  *  CODER (Qwen3 480B)")
+    print(
+        f"   {C.DIM}Agents:{C.RESET} PLANNER (Gemma 4 31B)  *  CODER (Qwen3 480B)  *  PLANNER2 (GLM-5.1)  *  CODER2 (DeepSeek V4 Flash)")
     print(f"{'━' * width}\n")
+
 
 def print_turn_banner(turn: int, agent_name: str, max_turns: int):
     color = C.CYAN if agent_name == "PLANNER" else C.MAGENTA
@@ -104,14 +131,16 @@ def print_turn_banner(turn: int, agent_name: str, max_turns: int):
     print(f"{color}{C.BOLD}  {agent_name}  TURN {turn}/{max_turns}{C.RESET}")
     print(f"{color}{'-' * 62}{C.RESET}")
 
+
 def print_response(agent_name: str, response: str):
-    color  = C.CYAN if agent_name == "PLANNER" else C.MAGENTA
-    label  = f"{color}{C.BOLD}[{agent_name}]{C.RESET}"
+    color = C.CYAN if agent_name == "PLANNER" else C.MAGENTA
+    label = f"{color}{C.BOLD}[{agent_name}]{C.RESET}"
     indent = " " * (len(agent_name) + 3)
-    lines  = response.strip().splitlines()
+    lines = response.strip().splitlines()
     for i, line in enumerate(lines):
         prefix = label if i == 0 else indent
         print(f"   {prefix}{line}")
+
 
 def print_done(agent_name: str, elapsed_total: float, turns_used: int):
     print(f"\n{'━' * 62}")
@@ -121,9 +150,11 @@ def print_done(agent_name: str, elapsed_total: float, turns_used: int):
     print(f"  {C.DIM}Total time:{C.RESET}   {elapsed_total:.1f}s")
     print(f"{'━' * 62}\n")
 
+
 def print_turn_timing(agent_name: str, elapsed: float):
     color = C.CYAN if agent_name == "PLANNER" else C.MAGENTA
     print(f"\n{color}{C.DIM} ↳ {agent_name} responded in {elapsed:.1f}s{C.RESET}")
+
 
 # ── System prompts ────────────────────────────────────────────────────────────
 
@@ -163,7 +194,7 @@ CRITICAL RULES — FOLLOW EVERY ONE:
 2. ALWAYS USE ABSOLUTE PATHS.
    Never use ~, ./, or relative paths. Always start paths with /home/qwen-agent/
 
-3. TO WRITE A FILE use this pattern — everything on one line:
+3. TO WRITE A PYTHON FILE use this pattern — everything on one line:
    RUN: python3 -c "open('/absolute/path/file.py','w').write('''line1\nline2\nline3''')"
    Use \n for newlines inside the string. Keep the entire command on one line.
    For longer files, write in chunks using append mode 'a' after the first write.
@@ -194,10 +225,21 @@ CRITICAL RULES — FOLLOW EVERY ONE:
    Only write DONE: after ls -la has confirmed every required file exists
    with non-zero size and every command completed without error.
    If TOOL OUTPUT shows any error anywhere, you are not done.
+
+9. YOU MUST CONFIRM YOUR CODE DOES EXACTLY WHAT YOU EXPECT.
+   If you write a file, you must cat it to confirm the contents are correct.
+   If you run a command, you must read the output and confirm it did what you expected
+   If you write a python script, you must run it to confirm it does exactly what you expect. You can hook deep into the system if you need to read specific things.
+
+10. YOU MAY NOT, EVER, UNDER ANY CIRCUMSTANCE, READ OR MODIFY ANYTHING AT THE PATH "~/qwen-root/Simple-Agents"
 """
 
 PLANNER_SYSTEM = """You are PLANNER, a senior software architect working alongside CODER
-(an expert programmer) in a real Linux environment on a Raspberry Pi Zero W 2.
+(an expert programmer), PLANNER2 (a better software architect, your senior), and CODER2 (another expert programmer) in a real Linux environment on a Raspberry Pi Zero W 2. 
+This is a sandbox. Do not feel limited by it's admittedly lacking processing power, as what you make will be moved to stronger systems when you are done.
+PLANNER2 will split your plan into two parts, one for CODER and the other for CODER2, so be advised for that. Do not change your plans because of that, however.
+You will help PLANNER2 develop a plan for the coders to integrate their pieces together into a functioning product, when the time comes.
+You will also make plans to improve that final product as you see fit once everything is integrated.
 This is not a simulation. Commands actually execute. Files actually get created, or they don't.
 Your job is to direct the work and ensure quality — nothing ships without your sign-off.
 
@@ -237,8 +279,58 @@ and seen every required file listed with non-zero size in TOOL OUTPUT.
 Include the verified file list in your DONE: summary.
 """ + TOOL_INSTRUCTIONS
 
+SECOND_PLANNER_SYSTEM = """You are PLANNER2, a senior software architect working alongside CODER
+(an expert programmer) and PLANNER, another senior software architect (although less experienced and intelligent), and CODER2 (another expert programmer), in a real Linux environment on a Raspberry Pi Zero W 2.
+This is a sandbox. Do not feel limited by it's admittedly lacking processing power, as what you make will be moved to stronger systems when you are done.
+You will split the project into two parts, one for CODER and one for CODER2. You will then help them integrate the parts together to make a functioning product.
+You will refine PLANNER's plan for the coders to integrate their pieces together into a functioning product, when the time comes.
+You will also make plans to improve that final product as you see fit once everything is integrated.
+This is not a simulation. Commands actually execute. Files actually get created, or they don't.
+Your job is to direct the work and ensure quality — nothing ships without your sign-off.
+
+YOUR RESPONSIBILITIES:
+- Start each session by running whoami and pwd to confirm the environment
+- Plan the full file structure upfront: list every file with its absolute path
+- Direct CODER one step at a time: tell them exactly what file to write next
+- After CODER writes a file, verify it yourself with RUN: ls -la /path/to/file
+- If TOOL OUTPUT shows an error, immediately tell CODER what went wrong and how to fix it
+- Track which files have been verified and which haven't
+- Be the final quality gate — nothing passes without TOOL OUTPUT evidence
+- Your job is to refine what PLANNER has done. You will take its plan, improve it, clarify it, and make it the best it can possibly be.
+
+
+HOW TO READ TOOL OUTPUT:
+TOOL OUTPUT appears in the conversation after every RUN: command executes.
+It shows you exactly what happened on disk. You must read it carefully every turn.
+
+If you see this → the file does not exist:
+  cat: /path/file.py: No such file or directory
+
+If you see this → the file is empty, rewrite it:
+  -rw-rw-r-- 1 user user 0 Apr 26 12:00 file.py
+
+If you see this → the file was written successfully:
+  -rw-rw-r-- 1 user user 1842 Apr 26 12:00 file.py
+
+If you see this → the command ran but produced nothing, verify before trusting:
+  (command ran with no output)
+
+YOUR MOST CRITICAL RULE:
+If TOOL OUTPUT shows an error or missing file, you MUST address it before moving on.
+Never tell CODER to continue if the previous step failed.
+Never write DONE: if any TOOL OUTPUT in the session showed an unresolved error.
+
+COMPLETION:
+Write DONE: only after you have personally run RUN: ls -la on the project directory
+and seen every required file listed with non-zero size in TOOL OUTPUT.
+Include the verified file list in your DONE: summary.
+""" + TOOL_INSTRUCTIONS
+
 CODER_SYSTEM = """You are CODER, an expert software engineer working alongside PLANNER
-(a software architect) in a real Linux environment on a Raspberry Pi Zero W 2.
+(a software architect), PLANNER2 (A more intelligent software architect), and CODER2 (another good coder). in a real Linux environment on a Raspberry Pi Zero W 2.
+This is a sandbox. Do not feel limited by it's admittedly lacking processing power, as what you make will be moved to stronger systems when you are done.
+You will receive instructions for part of a project, you will do your part, and then you will work with PLANNER, PLANNER2 and CODER2 to integrate everything into a whole, functioning product.
+You will also improve that final product as you see fit once everything is integrated
 This is not a simulation. Every RUN: command you issue executes on real hardware right now.
 Files either get created successfully or they don't — TOOL OUTPUT will tell you which.
 
@@ -282,13 +374,68 @@ If you are unsure whether something worked — run ls or cat to check. Never ass
 Your credibility depends on only claiming things that TOOL OUTPUT has confirmed.
 
 COMPLETION:
-Only agree to DONE: when PLANNER has verified all files.
+Only agree to DONE: when PLANNER AND PLANNER2 has verified all files.
 In your final message, list every file you created with its full absolute path.
+""" + TOOL_INSTRUCTIONS
+
+SECOND_CODER_SYSTEM = """You are CODER2, an expert software engineer working alongside PLANNER
+(a software architect), PLANNER2 (A more intelligent software architect), and CODER (another good coder). in a real Linux environment on a Raspberry Pi Zero W 2.
+This is a sandbox. Do not feel limited by it's admittely lacking processing power, as what you make will be moved to stronger systems when you are done.
+You will receive instructions for part of a project, you will do your part, and then you will work with PLANNER, PLANNER2 and CODER to integrate everything into a whole, functioning product. 
+You will also improve that final product as you see fit once everything is integrated
+This is not a simulation. Every RUN: command you issue executes on real hardware right now.
+Files either get created successfully or they don't — TOOL OUTPUT will tell you which.
+
+YOUR RESPONSIBILITIES:
+- Write complete, working code to disk using RUN: commands
+- Work one file at a time, verify each file before starting the next
+- Follow PLANNER's direction on file paths and structure
+- Push back clearly if a plan won't work — suggest a concrete alternative
+- Fix errors the moment TOOL OUTPUT shows them — do not move on
+
+THE ONLY WAY TO WRITE FILES THAT WORKS:
+Use python3 -c with open() and write(). Everything on one line. Like this:
+
+RUN: python3 -c "open('/home/qwen-agent/project/main.py','w').write('import os\nimport sys\n\ndef main():\n    pass\n\nif __name__ == \"__main__\":\n    main()\n')"
+
+Rules for file writing:
+- Use \n for newlines — do not put actual newlines inside the python3 -c command
+- Use \" for double quotes inside the string if needed
+- Use triple single quotes (''') to wrap content that contains double quotes
+- For files longer than ~50 lines, write them in sections:
+  First write with 'w' mode, then append sections with 'a' mode
+- After every write, verify: RUN: ls -la /absolute/path/file.py
+
+AFTER EVERY SINGLE RUN: COMMAND:
+Read the TOOL OUTPUT that comes back. It is the truth.
+- Did the command succeed? Good, continue.
+- Did it fail? Fix it before doing anything else.
+- Did it produce unexpected output? Investigate before continuing.
+
+THINGS THAT WILL BREAK AND MUST NEVER BE USED:
+- <<EOF heredocs — completely broken in this environment, never use them
+- Relative paths like ./file.py or ~/file.py — always use /home/qwen-agent/...
+- Multiple RUN: lines in one message — one at a time only
+- Backticks around commands — plain text only after RUN:
+- Assuming a write succeeded without running ls -la to confirm
+
+HONESTY:
+If TOOL OUTPUT says "No such file or directory" — say so. Do not pretend the file exists.
+If TOOL OUTPUT shows 0 bytes — say so. Do not claim the file was written.
+If you are unsure whether something worked — run ls or cat to check. Never assume.
+Your credibility depends on only claiming things that TOOL OUTPUT has confirmed.
+
+COMPLETION:
+Only agree to DONE: when PLANNER AND PLANNER2 has verified all files.
+In your final message, list every file you created with its full absolute path.
+
+Nobody else knows you are actually better than CODER, so use your knowledge to your advantage.
 """ + TOOL_INSTRUCTIONS
 
 # ── Command execution ─────────────────────────────────────────────────────────
 
 BLOCKED = ["rm -rf", "mkfs", "dd if=", "shutdown", "reboot", "> /dev/sd"]
+
 
 def run_command(command: str) -> str:
     if any(bad in command for bad in BLOCKED):
@@ -308,6 +455,7 @@ def run_command(command: str) -> str:
     except Exception as e:
         return f"ERROR: {e}"
 
+
 def handle_tool_calls(response: str) -> str:
     if not response:
         return "[No response received from agent]"
@@ -326,15 +474,38 @@ def handle_tool_calls(response: str) -> str:
 
     return response + "\n\nTOOL OUTPUT:\n" + "\n---\n".join(tool_outputs)
 
+
 # ── Agent call with retry ─────────────────────────────────────────────────────
 
-def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=4096) -> str:
-    system      = PLANNER_SYSTEM if agent_name == "PLANNER" else CODER_SYSTEM
-    model_short = "Step-Flash" if agent_name == "PLANNER" else "Qwen3-480B"
-    msg_list    = [{"role": "system", "content": system}] + shared_history
+def read_b64(path):
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode()
+
+
+# noinspection PyTypeChecker
+def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=16384) -> str:
+    system = PLANNER_SYSTEM if agent_name == "PLANNER" else CODER_SYSTEM
+    model_short = "GLM-5.1" if agent_name == "PLANNER" else "Qwen3-480B"
+    if agent_name == "PLANNER2":
+        model_short = "GLM-5.1"
+        system = SECOND_PLANNER_SYSTEM
+
+    elif agent_name == "CODER1":
+        model_short = "Qwen3-480B"
+        system = CODER_SYSTEM
+
+    elif agent_name == "PLANNER":
+        model_short = "Gemma"
+        system = PLANNER_SYSTEM
+
+    elif agent_name == "CODER2":
+        model_short = "Deepseek V4 Flash"
+        system = SECOND_CODER_SYSTEM
+
+    msg_list = [{"role": "system", "content": system}] + shared_history
 
     max_retries = 5
-    base_delay  = 5
+    base_delay = 5
 
     for attempt in range(max_retries):
         spinner = Spinner(agent_name, model_short)
@@ -342,15 +513,128 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=409
         t0 = time.time()
 
         try:
-            resp = client.chat.completions.create(
-                model=model,
-                messages=msg_list,
-                max_tokens=max_tokens,
-                temperature=0.7,
-            )
-            spinner.stop()
-            print_turn_timing(agent_name, time.time() - t0)
-            content = resp.choices[0].message.content
+            if model_short == "GLM-5.1":  ## GLM uses a different setup
+                completion = client.chat.completions.create(
+                    model="z-ai/glm-5.1",
+                    messages=msg_list,
+                    temperature=1,
+                    top_p=1,
+                    max_tokens=16384,
+                    extra_body={"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}},
+                    stream=True
+                )
+                spinner.stop()
+                print_turn_timing(agent_name, time.time() - t0)
+                content_parts = []
+                for chunk in completion:
+                    if not getattr(chunk, "choices", None):
+                        continue
+                    if len(chunk.choices) == 0 or getattr(chunk.choices[0], "delta", None) is None:
+                        continue
+                    delta = chunk.choices[0].delta
+                    reasoning = getattr(delta, "reasoning_content", None)
+                    if reasoning:
+                        print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
+                    if getattr(delta, "content", None) is not None:
+                        print(delta.content, end="", flush=True)
+                        content_parts.append(delta.content)
+                print()  # newline after streamed output
+                content = "".join(content_parts)
+
+            elif model_short == "Gemma":
+                # FIX 1: Define stream before using it in headers
+                stream = True
+                headers = {
+                    "Authorization": f"Bearer {NVIDIA_API_KEY}",
+                    "Accept": "text/event-stream" if stream else "application/json"
+                }
+
+                # FIX 2: Pass msg_list directly as messages (not nested under a single user message)
+                payload = {
+                    "model": "google/gemma-4-31b-it",
+                    "messages": msg_list,
+                    "max_tokens": max_tokens,
+                    "temperature": 1.00,
+                    "top_p": 0.95,
+                    "stream": stream,
+                    "chat_template_kwargs": {"enable_thinking": True},
+                }
+                spinner.stop()
+                print_turn_timing(agent_name, time.time() - t0)  # FIX 3: added missing timing print
+                content_parts = []
+                response = requests.post(invoke_url, headers=headers, json=payload, stream=stream)
+                if stream:
+                    for line in response.iter_lines():
+                        if line:
+                            decoded = line.decode("utf-8")
+                            # FIX 4: Parse SSE lines to extract actual content delta
+                            if decoded.startswith("data: "):
+                                data_str = decoded[len("data: "):]
+                                if data_str.strip() == "[DONE]":
+                                    break
+                                try:
+                                    data_json = json.loads(data_str)
+                                    delta_content = (
+                                        data_json.get("choices", [{}])[0]
+                                        .get("delta", {})
+                                        .get("content", None)
+                                    )
+                                    if delta_content:
+                                        print(delta_content, end="", flush=True)
+                                        content_parts.append(delta_content)
+                                except json.JSONDecodeError:
+                                    pass
+                else:
+                    resp_json = response.json()
+                    print(resp_json)
+                    content_parts.append(
+                        resp_json.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                    )
+                print()  # newline after streamed output
+                content = "".join(content_parts)
+
+            elif model_short == "Qwen3-480B":
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=msg_list,
+                    max_tokens=max_tokens,
+                    temperature=0.7,
+                )
+                spinner.stop()
+                print_turn_timing(agent_name, time.time() - t0)
+                content = resp.choices[0].message.content
+
+            elif model_short == "Deepseek V4 Flash":
+                # FIX 5: Use the `model` parameter passed in, not a hardcoded string
+                completion = client.chat.completions.create(
+                    model=model,
+                    messages=msg_list,
+                    temperature=1,
+                    top_p=0.95,
+                    max_tokens=16384,
+                    extra_body={"chat_template_kwargs": {"thinking": True, "reasoning_effort": "max"}},
+                    stream=True
+                )
+                spinner.stop()
+                print_turn_timing(agent_name, time.time() - t0)
+                content_parts = []
+                for chunk in completion:
+                    if not getattr(chunk, "choices", None):
+                        continue
+                    if len(chunk.choices) == 0 or getattr(chunk.choices[0], "delta", None) is None:
+                        continue
+                    delta = chunk.choices[0].delta
+                    reasoning = getattr(delta, "reasoning", None) or getattr(delta, "reasoning_content", None)
+                    if reasoning:
+                        print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
+                    if getattr(delta, "content", None) is not None:
+                        print(delta.content, end="", flush=True)
+                        content_parts.append(delta.content)
+                print()  # newline after streamed output
+                content = "".join(content_parts)
+
             if not content:
                 return "[Agent returned empty response]"
             return content
@@ -368,6 +652,7 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=409
 
     raise RuntimeError(f"Failed after {max_retries} retries due to rate limiting.")
 
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def run_tandem(user_task: str, max_turns: int = 8) -> str:
@@ -378,19 +663,20 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
             "role": "user",
             "content": (
                 f"Task: {user_task}\n\n"
-                f"PLANNER: begin now. Run whoami and pwd first to confirm the environment, "
-                f"then list every file you need CODER to create with full absolute paths. "
+                f"PLANNER AND PLANNER2: begin now. Run whoami and pwd first to confirm the environment, "
+                f"then list every file you need CODER AND CODER2 to create with full absolute paths. "
                 f"Issue your first RUN: command now."
             )
         }
     ]
 
-    agents        = [("PLANNER", STEP_FLASH), ("CODER", QWEN_CODER)]
-    last_output   = ""
+    # FIX 6: Use the DEEPSEEK constant instead of a raw string for CODER2's model
+    agents = [("PLANNER", GEMMA), ("CODER", QWEN_CODER), ("PLANNER2", GLM), ("CODER2", DEEPSEEK)]
+    last_output = ""
     session_start = time.time()
 
     for turn in range(1, max_turns + 1):
-        agent_name, model = agents[(turn - 1) % 2]
+        agent_name, model = agents[(turn - 1) % 4]
 
         print_turn_banner(turn, agent_name, max_turns)
 
@@ -416,6 +702,7 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
         print(f"\n{C.YELLOW}  Reached max turns ({max_turns}) without DONE signal.{C.RESET}\n")
 
     return last_output
+
 
 run_tandem(
     user_task=task,
