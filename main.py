@@ -525,7 +525,7 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                     messages=msg_list,
                     temperature=1,
                     top_p=1,
-                    max_tokens=16384,
+                    max_tokens=16384**2, ## we want lots of tokens
                     extra_body={"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}},
                     stream=True,
                 )
@@ -742,7 +742,7 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
         print_response(agent_name, response)
         shared_history.append({
             "role": "assistant" if agent_name == "PLANNER" else "user",
-            "content": f"[{agent_name}]: {response}, and that was turn number: {turn} / {max_turns}"
+            "content": f"[{agent_name}]: {response}, and that was turn number: {turn} / {max_turns + 1}"
         })
 
         last_output = response
