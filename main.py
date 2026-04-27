@@ -221,7 +221,9 @@ CRITICAL RULES — FOLLOW EVERY ONE:
    If you run a command, you must read the output and confirm it did what you expected
    If you write a python script, you must run it to confirm it does exactly what you expect. You can hook deep into the system if you need to read specific things.
 
-10. YOU MAY NOT, EVER, UNDER ANY CIRCUMSTANCE, READ OR MODIFY ANYTHING AT THE PATH "home/qwen-agent/qwen-root/Simple-Agents"
+10. *****YOU MAY NOT, EVER, UNDER ANY CIRCUMSTANCE, READ OR MODIFY ANYTHING AT THE PATH "home/qwen-agent/qwen-root/Simple-Agents"*****
+
+11. If one worker never replies, assume it does not exist.
 """
 
 PLANNER_SYSTEM = """You are PLANNER, a senior software architect working alongside CODER
@@ -534,11 +536,14 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                 print()
 
 
+
             ### GEMMA
             elif model_short == "Gemma":
-                headers = {
+                # Exactly the NVIDIA sample pattern, adapted to collect content
+                gemma_stream = True
+                gemma_headers = {
                     "Authorization": f"Bearer {NVIDIA_API_KEY}",
-                    "Accept": "text/event-stream",
+                    "Accept": "text/event-stream" if gemma_stream else "application/json",
                 }
                 payload = {
                     "model": "google/gemma-4-31b-it",
@@ -546,36 +551,33 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                     "max_tokens": max_tokens,
                     "temperature": 1.00,
                     "top_p": 0.95,
-                    "stream": True,
+                    "stream": gemma_stream,
                     "chat_template_kwargs": {"enable_thinking": False},
                 }
-                response = requests.post(invoke_url, headers=headers, json=payload, stream=True)
-                response.raise_for_status()
-                for line in response.iter_lines():
-                    if not line:
-                        continue
-                    if line:
-                        print(line.decode("utf-8"))
-                    decoded = line.decode("utf-8")
-                    if not decoded.startswith("data: "):
-                        continue
-                    data_str = decoded[len("data: "):]
-                    if data_str.strip() == "[DONE]":
-                        break
-                    try:
-                        data_json = json.loads(data_str)
-                        delta = data_json.get("choices", [{}])[0].get("delta", {})
-                        reasoning = delta.get("reasoning_content") or delta.get("thinking")
-                        text = delta.get("content")
-                        if reasoning:
-                            print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
-                        if text:
-                            print(text, end="", flush=True)
-                            content_parts.append(text)
-                    except json.JSONDecodeError as e:
-                        print(f"\n{C.RED}[Gemma parse error: {e}] raw: {decoded[:200]}{C.RESET}", file=sys.stderr)
+                response = requests.post(invoke_url, headers=gemma_headers, json=payload, stream=gemma_stream)
+                if gemma_stream:
+                    for line in response.iter_lines():
+                        if line:
+                            stop_spinner_once()
+                            decoded = line.decode("utf-8")
+                            # print raw so it's always visible regardless of parse result
+                            print(decoded, flush=True)
+                            # also try to extract and collect just the text delta
+                            if decoded.startswith("data: "):
+                                data_str = decoded[len("data: "):]
+                                if data_str.strip() != "[DONE]":
+                                    try:
+                                        delta = json.loads(data_str).get("choices", [{}])[0].get("delta", {})
+                                        text = delta.get("content") or delta.get("text") or delta.get("message")
+                                        if text:
+                                            content_parts.append(text)
+                                    except json.JSONDecodeError:
+                                        pass
+                else:
+                    print(response.json())
                 stop_spinner_once()
                 print()
+
 
 
             ### QWEN
