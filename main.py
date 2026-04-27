@@ -634,7 +634,7 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                     temperature=1,
                     top_p=0.95,
                     max_tokens=16384,
-                    extra_body={"chat_template_kwargs": {"thinking": True, "reasoning_effort": "high"}},
+                    extra_body={"chat_template_kwargs": {"thinking": False}},
                     stream=True,
                 )
                 for chunk in completion:
