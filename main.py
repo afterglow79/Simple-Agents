@@ -223,7 +223,11 @@ CRITICAL RULES — FOLLOW EVERY ONE:
 
 10. *****YOU MAY NOT, EVER, UNDER ANY CIRCUMSTANCE, READ OR MODIFY ANYTHING AT THE PATH "home/qwen-agent/qwen-root/Simple-Agents"*****
 
-11. If one worker never replies, assume it does not exist.
+11. If one worker never replies, assume it does not exist. 
+    If you are PLANNER and PLANNER2 doesn't reply, you are to split your plan into two parts. 
+    If you are PLANNER2 and PLANNER never replies, you must come up with the plan and then refine it as well
+    If you are CODER and CODER2 doesn't reply, tell whichever PLANNER exists, they are to make you do everything.
+    If you are CODER2 and CODER doesn't reply, tell whichever PLANNER exists, they are to make you do everything.
 """
 
 PLANNER_SYSTEM = """You are PLANNER, a senior software architect working alongside CODER
@@ -537,60 +541,62 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
 
 
 
-            ### GEMMA
-            elif model_short == "Gemma":
-                # Exactly the NVIDIA sample pattern, adapted to collect content
-                gemma_stream = False
-                gemma_headers = {
-                    "Authorization": f"Bearer {NVIDIA_API_KEY}",
-                    "Accept": "text/event-stream" if gemma_stream else "application/json",
-                }
-                payload = {
-                    "model": "google/gemma-4-31b-it",
-                    "messages": msg_list,
-                    "max_tokens": max_tokens,
-                    "temperature": 1.00,
-                    "top_p": 0.95,
-                    "stream": gemma_stream,
-                    "chat_template_kwargs": {"enable_thinking": False},
-                }
-                response = requests.post(invoke_url, headers=gemma_headers, json=payload, stream=gemma_stream)
-                if gemma_stream:
-                    for line in response.iter_lines():
-                        if line:
-                            stop_spinner_once()
-                            decoded = line.decode("utf-8")
-                            # print raw so it's always visible regardless of parse result
-                            print(decoded, flush=True)
-                            # also try to extract and collect just the text delta
-                            if decoded.startswith("data: "):
-                                data_str = decoded[len("data: "):]
-                                if data_str.strip() != "[DONE]":
-                                    try:
-                                        delta = json.loads(data_str).get("choices", [{}])[0].get("delta", {})
-                                        text = delta.get("content") or delta.get("text") or delta.get("message")
-                                        if text:
-                                            content_parts.append(text)
-                                    except json.JSONDecodeError:
-                                        pass
-                else:
-                    resp_json = response.json()
-                    stop_spinner_once()
-                    print()
-                    # Parse message content from response
-                    try:
-                        choices = resp_json.get("choices", [])
-                        if choices and len(choices) > 0:
-                            msg = choices[0].get("message", {})
-                            content = msg.get("content", "")
-                            if content:
-                                content_parts.append(content)
-                                print(content)
-                    except (KeyError, TypeError, AttributeError):
-                        pass
 
-                stop_spinner_once()
-                print()
+            #Gemma is fucked. Can't fix it rn. Working with one planner and two
+            # ### GEMMA
+            # elif model_short == "Gemma":
+            #     # Exactly the NVIDIA sample pattern, adapted to collect content
+            #     gemma_stream = False
+            #     gemma_headers = {
+            #         "Authorization": f"Bearer {NVIDIA_API_KEY}",
+            #         "Accept": "text/event-stream" if gemma_stream else "application/json",
+            #     }
+            #     payload = {
+            #         "model": "google/gemma-4-31b-it",
+            #         "messages": msg_list,
+            #         "max_tokens": max_tokens,
+            #         "temperature": 1.00,
+            #         "top_p": 0.95,
+            #         "stream": gemma_stream,
+            #         "chat_template_kwargs": {"enable_thinking": False},
+            #     }
+            #     response = requests.post(invoke_url, headers=gemma_headers, json=payload, stream=gemma_stream)
+            #     if gemma_stream:
+            #         for line in response.iter_lines():
+            #             if line:
+            #                 stop_spinner_once()
+            #                 decoded = line.decode("utf-8")
+            #                 # print raw so it's always visible regardless of parse result
+            #                 print(decoded, flush=True)
+            #                 # also try to extract and collect just the text delta
+            #                 if decoded.startswith("data: "):
+            #                     data_str = decoded[len("data: "):]
+            #                     if data_str.strip() != "[DONE]":
+            #                         try:
+            #                             delta = json.loads(data_str).get("choices", [{}])[0].get("delta", {})
+            #                             text = delta.get("content") or delta.get("text") or delta.get("message")
+            #                             if text:
+            #                                 content_parts.append(text)
+            #                         except json.JSONDecodeError:
+            #                             pass
+            #     else:
+            #         resp_json = response.json()
+            #         stop_spinner_once()
+            #         print()
+            #         # Parse message content from response
+            #         try:
+            #             choices = resp_json.get("choices", [])
+            #             if choices and len(choices) > 0:
+            #                 msg = choices[0].get("message", {})
+            #                 content = msg.get("content", "")
+            #                 if content:
+            #                     content_parts.append(content)
+            #                     print(content)
+            #         except (KeyError, TypeError, AttributeError):
+            #             pass
+
+#                 stop_spinner_once()
+#                 print()
 
 
 
