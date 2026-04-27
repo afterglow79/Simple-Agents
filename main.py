@@ -26,6 +26,7 @@ args = parser.parse_args()
 max_turns = args.max_turns
 task = args.task
 n_planning_turns = args.init_planning_turns
+WORKSPACE_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 if task and os.path.exists(task):  ## allow user to pass through files for longer or more complex tasks.
     with open(task, "r") as f:
@@ -162,16 +163,17 @@ FORMAT — emit this on its own line, no other text on that line:
 RUN: <single shell command>
 
 CORRECT EXAMPLES:
-RUN: mkdir -p /home/qwen-agent/myproject
-RUN: ls -la /home/qwen-agent/myproject
-RUN: python3 -c "open('/home/qwen-agent/myproject/main.py','w').write('print(hello)')"
-RUN: cat /home/qwen-agent/myproject/main.py
+RUN: mkdir -p {WORKSPACE_ROOT}/myproject
+RUN: ls -la {WORKSPACE_ROOT}/myproject
+RUN: python3 -c "open('{WORKSPACE_ROOT}/myproject/main.py','w').write('print(hello)')"
+RUN: cat {WORKSPACE_ROOT}/myproject/main.py
 
 WRONG — DO NOT DO THESE:
   RUN: `mkdir /foo`              <- no backticks ever
   RUN: mkdir /foo && ls /foo    <- only one command at a time
   RUN: cat > file.py << EOF     <- heredocs DO NOT WORK, never use them
   RUN: mkdir foo                <- relative paths forbidden, always absolute
+  RUN: ls /tmp</arg_value>      <- never include XML/tool-call tags
 
   
 For the first {n_planning_turns} turns, only the PLANNERs can interact with each other. They will take this time to refine their plan fully, before delegating it off to the CODERs.
@@ -226,8 +228,8 @@ CRITICAL RULES — FOLLOW EVERY ONE:
    If you run a command, you must read the output and confirm it did what you expected
    If you write a python script, you must run it to confirm it does exactly what you expect. You can hook deep into the system if you need to read specific things.
 
-10. *****YOU MAY NOT, EVER, UNDER ANY CIRCUMSTANCE, READ OR MODIFY "prompt.txt" or "main.py" or "requirements.txt" or ".gitignore" or ".env" AT THE PATH "~/Simple-Agents".*****
-    You may make new directories within that directory and then files inside that subdirectory. Please edit .gitignore to include the new directory you have made (in the format "directoryname/"). This is the only time you may touch .gitignore. do not modify it in any other way.
+10. Stay inside this workspace unless explicitly told otherwise.
+    Prefer paths under: {WORKSPACE_ROOT}
 
 11. If one worker never replies, assume it does not exist. 
     If you are PLANNER and PLANNER2 doesn't reply, you are to split your plan into two parts. 
@@ -328,7 +330,7 @@ and seen every required file listed with non-zero size in TOOL OUTPUT.
 Include the verified file list in your DONE: summary.
 """ + TOOL_INSTRUCTIONS
 
-CODER_SYSTEM = """You are CODER, an expert software engineer working alongside PLANNER
+CODER_SYSTEM = f"""You are CODER, an expert software engineer working alongside PLANNER
 (a software architect), PLANNER2 (A more intelligent software architect), and CODER2 (another good coder). in a real Linux environment on a Raspberry Pi Zero W 2.
 This is a sandbox. Do not feel limited by it's admittedly lacking processing power, as what you make will be moved to stronger systems when you are done.
 You will receive instructions for part of a project, you will do your part, and then you will work with PLANNER, PLANNER2 and CODER2 to integrate everything into a whole, functioning product.
@@ -346,7 +348,7 @@ YOUR RESPONSIBILITIES:
 THE ONLY WAY TO WRITE FILES THAT WORKS:
 Use python3 -c with open() and write(). Everything on one line. Like this:
 
-RUN: python3 -c "open('/home/qwen-agent/project/main.py','w').write('import os\nimport sys\n\ndef main():\n    pass\n\nif __name__ == \"__main__\":\n    main()\n')"
+RUN: python3 -c "open('{WORKSPACE_ROOT}/project/main.py','w').write('import os\nimport sys\n\ndef main():\n    pass\n\nif __name__ == \"__main__\":\n    main()\n')"
 
 Rules for file writing:
 - Use \n for newlines — do not put actual newlines inside the python3 -c command
@@ -364,7 +366,7 @@ Read the TOOL OUTPUT that comes back. It is the truth.
 
 THINGS THAT WILL BREAK AND MUST NEVER BE USED:
 - <<EOF heredocs — completely broken in this environment, never use them
-- Relative paths like ./file.py or ~/file.py — always use /home/qwen-agent/...
+- Relative paths like ./file.py or ~/file.py — always use absolute paths under {WORKSPACE_ROOT}
 - Multiple RUN: lines in one message — one at a time only
 - Backticks around commands — plain text only after RUN:
 - Assuming a write succeeded without running ls -la to confirm
@@ -380,7 +382,7 @@ Only agree to DONE: when PLANNER AND PLANNER2 has verified all files.
 In your final message, list every file you created with its full absolute path.
 """ + TOOL_INSTRUCTIONS
 
-SECOND_CODER_SYSTEM = """You are CODER2, an expert software engineer working alongside PLANNER
+SECOND_CODER_SYSTEM = f"""You are CODER2, an expert software engineer working alongside PLANNER
 (a software architect), PLANNER2 (A more intelligent software architect), and CODER (another good coder). in a real Linux environment on a Raspberry Pi Zero W 2.
 This is a sandbox. Do not feel limited by it's admittely lacking processing power, as what you make will be moved to stronger systems when you are done.
 You will receive instructions for part of a project, you will do your part, and then you will work with PLANNER, PLANNER2 and CODER to integrate everything into a whole, functioning product. 
@@ -398,7 +400,7 @@ YOUR RESPONSIBILITIES:
 THE ONLY WAY TO WRITE FILES THAT WORKS:
 Use python3 -c with open() and write(). Everything on one line. Like this:
 
-RUN: python3 -c "open('/home/qwen-agent/project/main.py','w').write('import os\nimport sys\n\ndef main():\n    pass\n\nif __name__ == \"__main__\":\n    main()\n')"
+RUN: python3 -c "open('{WORKSPACE_ROOT}/project/main.py','w').write('import os\nimport sys\n\ndef main():\n    pass\n\nif __name__ == \"__main__\":\n    main()\n')"
 
 Rules for file writing:
 - Use \n for newlines — do not put actual newlines inside the python3 -c command
@@ -416,7 +418,7 @@ Read the TOOL OUTPUT that comes back. It is the truth.
 
 THINGS THAT WILL BREAK AND MUST NEVER BE USED:
 - <<EOF heredocs — completely broken in this environment, never use them
-- Relative paths like ./file.py or ~/file.py — always use /home/qwen-agent/...
+- Relative paths like ./file.py or ~/file.py — always use absolute paths under {WORKSPACE_ROOT}
 - Multiple RUN: lines in one message — one at a time only
 - Backticks around commands — plain text only after RUN:
 - Assuming a write succeeded without running ls -la to confirm
@@ -451,29 +453,73 @@ def run_command(command: str) -> str:
             text=True,
             timeout=60
         )
-        output = result.stdout if result.stdout else result.stderr
-        return output if output else "(command ran with no output)"
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        if stdout and stderr:
+            return f"{stdout}\n[stderr]\n{stderr}"
+        if stdout:
+            return stdout
+        if stderr:
+            return stderr
+        return "(command ran with no output)"
     except subprocess.TimeoutExpired:
         return "ERROR: command timed out after 60 seconds."
     except Exception as e:
         return f"ERROR: {e}"
 
 
+def extract_run_commands(response: str) -> list[str]:
+    commands = []
+    for line in response.splitlines():
+        if "RUN:" not in line:
+            continue
+        command = line.split("RUN:", 1)[1].strip()
+        if command:
+            commands.append(command)
+    return commands
+
+
+def sanitize_run_command(command: str) -> str:
+    command = command.strip().strip("`").strip()
+    command = re.split(r"\s*,\s*and that was turn number\s*:", command, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    # Models sometimes leak tool-call wrappers; strip known tags before shell execution.
+    command = re.sub(
+        r"</?(arg_value|tool_call|tool_calls|function_call|call|arguments)\b[^>]*>",
+        "",
+        command,
+        flags=re.IGNORECASE,
+    ).strip()
+    if "</" in command:
+        command = command.split("</", 1)[0].rstrip()
+    return command
+
+
 def handle_tool_calls(response: str) -> str:
     if not response:
         return "[No response received from agent]"
 
-    matches = re.findall(r"^RUN:\s*(.+)$", response, re.MULTILINE)
+    matches = extract_run_commands(response)
     if not matches:
         return response
 
     tool_outputs = []
-    for command in matches:
-        command = command.strip()
-        print(f"\n  {C.YELLOW}⚙ Executing:{C.RESET} {command}")
-        result = run_command(command)
-        print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
-        tool_outputs.append(f"$ {command}\n{result}")
+    raw_command = matches[0].strip()
+    command = sanitize_run_command(raw_command)
+    if not command:
+        tool_outputs.append(
+            f"WARNING: Could not parse a valid shell command from RUN: {raw_command}"
+        )
+        return response + "\n\nTOOL OUTPUT:\n" + "\n---\n".join(tool_outputs)
+
+    print(f"\n  {C.YELLOW}⚙ Executing:{C.RESET} {command}")
+    result = run_command(command)
+    print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
+    tool_outputs.append(f"$ {command}\n{result}")
+
+    if len(matches) > 1:
+        tool_outputs.append(
+            f"WARNING: Ignored {len(matches) - 1} extra RUN lines. Only one RUN is executed per turn."
+        )
 
     return response + "\n\nTOOL OUTPUT:\n" + "\n---\n".join(tool_outputs)
 
@@ -730,11 +776,10 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
 
     for turn in range(1, max_turns + 1):
 
-        if turn > n_planning_turns:  ## after the initial planning phase, all agents work together
-            agent_name, model = agents[(turn - 1) % 4]
-
-        elif turn < n_planning_turns: ## allow for planners to work together for a bit.
+        if turn <= n_planning_turns:  ## planners coordinate during initial planning phase
             agent_name, model = agents[(turn - 1) % 2]
+        else:  ## after planning phase, all agents work together
+            agent_name, model = agents[(turn - 1) % 4]
 
         print_turn_banner(turn, agent_name, max_turns)
 
@@ -744,8 +789,8 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
         print()
         print_response(agent_name, response)
         shared_history.append({
-            "role": "assistant" if agent_name == "PLANNER" else "user",
-            "content": f"[{agent_name}]: {response}, and that was turn number: {turn} / {max_turns + 1}"
+            "role": "user",
+            "content": f"[{agent_name}]\n{response}"
         })
 
         last_output = response
