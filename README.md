@@ -1,2 +1,2 @@
 # Simple-Agents
-Runs two agentic AI from NVIDIA build API in tandem using python. Built to run on Linux.
+Runs several agentic AI from NVIDIA build API in tandem using python. Built to run on Linux, with a fork for Windows.
