@@ -693,7 +693,7 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
 
     #agents = [("PLANNER", GEMMA), ("CODER", QWEN_CODER), ("PLANNER2", GLM), ("CODER2", DEEPSEEK)]
     # Skip broken Gemma; use only GLM, Qwen, and DeepSeek
-    agents = [("CODER", QWEN_CODER), ("PLANNER2", GLM), ("CODER2", DEEPSEEK)]
+    agents = [("PLANNER2", GLM), ("CODER", QWEN_CODER), ("CODER2", DEEPSEEK)]
 
     last_output = ""
     session_start = time.time()
