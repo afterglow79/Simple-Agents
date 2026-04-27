@@ -540,7 +540,7 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
             ### GEMMA
             elif model_short == "Gemma":
                 # Exactly the NVIDIA sample pattern, adapted to collect content
-                gemma_stream = True
+                gemma_stream = False
                 gemma_headers = {
                     "Authorization": f"Bearer {NVIDIA_API_KEY}",
                     "Accept": "text/event-stream" if gemma_stream else "application/json",
@@ -574,7 +574,21 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                                     except json.JSONDecodeError:
                                         pass
                 else:
-                    print(response.json())
+                    resp_json = response.json()
+                    stop_spinner_once()
+                    print()
+                    # Parse message content from response
+                    try:
+                        choices = resp_json.get("choices", [])
+                        if choices and len(choices) > 0:
+                            msg = choices[0].get("message", {})
+                            content = msg.get("content", "")
+                            if content:
+                                content_parts.append(content)
+                                print(content)
+                    except (KeyError, TypeError, AttributeError):
+                        pass
+
                 stop_spinner_once()
                 print()
 
