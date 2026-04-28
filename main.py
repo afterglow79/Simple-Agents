@@ -233,6 +233,8 @@ Use RUN: for everything else: creating directories, listing files, running scrip
 reading file contents, etc. Do NOT use RUN: + python3 -c to write code files —
 use WRITE_FILE: instead.
 
+Please keep RUN commands per turn to a minimum, but feel free to chain things together with &&.
+
 FORMAT — emit this on its own line, no other text on that line:
 
 RUN: <shell command>
