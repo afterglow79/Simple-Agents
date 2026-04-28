@@ -171,11 +171,10 @@ RULES FOR WRITE_FILE:
 - The path must be on the SAME LINE as WRITE_FILE:, always absolute.
 - Content goes between the two --- delimiters (each on its own line).
 - No escaping of quotes, backslashes, or newlines — write code exactly as it should appear.
-- ONE WRITE_FILE: block per response, then stop and wait for TOOL OUTPUT.
+- You may include multiple WRITE_FILE: blocks in one response; they will be executed in order.
 - Parent directories are created automatically.
 - TOOL OUTPUT will report bytes written. Zero bytes = failure, try again.
-- After every WRITE_FILE:, your next action must verify with:
-  RUN: ls -la /absolute/path/to/file.py
+- After writing files, verify them with RUN: ls -la /absolute/path/to/file.py when needed.
 
 CORRECT EXAMPLE:
 WRITE_FILE: {WORKSPACE_ROOT}/myproject/main.py
@@ -200,7 +199,7 @@ use WRITE_FILE: instead.
 
 FORMAT — emit this on its own line, no other text on that line:
 
-RUN: <single shell command>
+RUN: <shell command>
 
 CORRECT EXAMPLES:
 RUN: mkdir -p {WORKSPACE_ROOT}/myproject
@@ -215,24 +214,41 @@ WRONG — DO NOT DO THESE:
   RUN: mkdir foo                <- relative paths forbidden, always absolute
   RUN: ls /tmp</arg_value>      <- never include XML/tool-call tags
 
+
+════════════════════════════════════════
+TOOL: READ/WRITE TO PERSISTENT MEMORY
+════════════════════════════════════════
+Use: "WRITE_TO_MEMORY: content" to save important information to persistent memory across that will be used across runs and to communicate critical bits of information with other agents. You should not use this liberally.
+Use: "READ_FROM_MEMORY" to read the entire contents of the persistent memory. This is useful for recalling important information that other agents have written, or that you have written in previous turns. Do not use this to read back large amounts of data that you just wrote — you should already have that information in your current context. Only use READ_FROM_MEMORY when you need to recall something important that was written long ago or by another agent.
+
+CORRECT EXAMPLES:
+    WRITE_TO_MEMORY: "1+1 is 2"
+    WRITE_TO_MEMORY: "Remember to use absolute paths!"
+    READ_FROM_MEMORY
   
+INCORRECT EXAMPLES:
+    WRITE_TO_MEMORY: "ls -la /tmp"   <- do not write shell commands to memory,
+    WRITE_TO_MEMORY: "cat file.py"    <- do not write shell commands to memory
+    WRITE_TO_MEMORY: "Large amount of data" <- Only use memory for critical information that must persist across turns/runs or be shared between agents. Do not dump large data here.
+    READ_FROM_MEMORY: "specific key" <- there are no keys, this command simply returns the entire memory content. Do not include extra text after READ_FROM_MEMORY.
+
 For the first {n_planning_turns} turns, only the PLANNERs can interact with each other. They will take this time to refine their plan fully, before delegating it off to the CODERs.
 
 ════════════════════════════════════════
 CRITICAL RULES — FOLLOW EVERY ONE:
 ════════════════════════════════════════
 
-1. ONE TOOL ACTION PER RESPONSE, THEN STOP.
-   Issue exactly one WRITE_FILE: block OR one RUN: command per response, then end your message.
-   Wait for TOOL OUTPUT before doing anything else.
-   Do not combine a WRITE_FILE: and a RUN: in the same message.
+1. MULTIPLE TOOL ACTIONS PER RESPONSE ARE ALLOWED.
+    You may issue several WRITE_FILE: blocks, RUN: commands, and memory actions in one response.
+    Keep them in the order you want them executed, then wait for TOOL OUTPUT.
 
 2. ALWAYS USE ABSOLUTE PATHS.
    Never use ~, ./, or relative paths.
 
 3. TO WRITE ANY SOURCE CODE FILE, use WRITE_FILE: — not RUN: + python3 -c.
-   WRITE_FILE: handles real newlines, real quotes, and any file length without escaping.
-   Only use python3 -c for trivial single-line writes when WRITE_FILE: is unavailable.
+    WRITE_FILE: handles real newlines, real quotes, and any file length without escaping.
+    You may batch multiple file writes in one response when that is the most efficient path.
+    Only use python3 -c for trivial single-line writes when WRITE_FILE: is unavailable.
 
 4. VERIFY EVERY FILE AFTER WRITING.
    After every WRITE_FILE: block, your next action must be:
@@ -402,8 +418,8 @@ if __name__ == "__main__":
 Rules for WRITE_FILE:
 - Path must be absolute and on the same line as WRITE_FILE:
 - Content between the two --- lines is written exactly as-is
-- ONE WRITE_FILE: block per response, then stop and wait for TOOL OUTPUT
-- After every WRITE_FILE:, verify: RUN: ls -la /absolute/path/file.py
+- You may include multiple WRITE_FILE: blocks and RUN: lines in one response.
+- After writing files, verify them with RUN: ls -la /absolute/path/file.py when needed.
 - Only fall back to python3 -c for trivial single-line files
 
 AFTER EVERY SINGLE TOOL ACTION:
@@ -415,7 +431,7 @@ Read the TOOL OUTPUT that comes back. It is the truth.
 THINGS THAT WILL BREAK AND MUST NEVER BE USED:
 - <<EOF heredocs — completely broken in this environment, never use them
 - Relative paths like ./file.py or ~/file.py — always use absolute paths under {WORKSPACE_ROOT}
-- Multiple WRITE_FILE: blocks or RUN: lines in one message — one at a time only
+- Multiple WRITE_FILE: blocks or RUN: lines in one message are allowed; keep them ordered.
 - Backticks around commands — plain text only after RUN:
 - Assuming a write succeeded without running ls -la to confirm
 
@@ -464,8 +480,8 @@ if __name__ == "__main__":
 Rules for WRITE_FILE:
 - Path must be absolute and on the same line as WRITE_FILE:
 - Content between the two --- lines is written exactly as-is
-- ONE WRITE_FILE: block per response, then stop and wait for TOOL OUTPUT
-- After every WRITE_FILE:, verify: RUN: ls -la /absolute/path/file.py
+- You may include multiple WRITE_FILE: blocks and RUN: lines in one response.
+- After writing files, verify them with RUN: ls -la /absolute/path/file.py when needed.
 - Only fall back to python3 -c for trivial single-line files
 
 AFTER EVERY SINGLE TOOL ACTION:
@@ -477,7 +493,7 @@ Read the TOOL OUTPUT that comes back. It is the truth.
 THINGS THAT WILL BREAK AND MUST NEVER BE USED:
 - <<EOF heredocs — completely broken in this environment, never use them
 - Relative paths like ./file.py or ~/file.py — always use absolute paths under {WORKSPACE_ROOT}
-- Multiple WRITE_FILE: blocks or RUN: lines in one message — one at a time only
+- Multiple WRITE_FILE: blocks or RUN: lines in one message are allowed; keep them ordered.
 - Backticks around commands — plain text only after RUN:
 - Assuming a write succeeded without running ls -la to confirm
 
@@ -525,6 +541,21 @@ def run_command(command: str) -> str:
     except Exception as e:
         return f"ERROR: {e}"
 
+def write_to_persistent_memory(content: str):
+    with open("agent/persistent-mem.txt", "a") as f:
+        f.write(content + "\n\n")
+
+def read_persistent_memory() -> str:
+    if not os.path.exists("agent/persistent-mem.txt"):
+        return ""
+    with open("agent/persistent-mem.txt", "r") as f:
+        return f.read()
+
+def read_file(path: str) -> str:
+    if not os.path.exists(path):
+        return f"File not found: {path}"
+    with open(path, "r") as f:
+        return f.read()
 
 def extract_run_commands(response: str) -> list[str]:
     commands = []
@@ -535,7 +566,6 @@ def extract_run_commands(response: str) -> list[str]:
         if command:
             commands.append(command)
     return commands
-
 
 def extract_write_file_blocks(response: str) -> list[tuple[str, str]]:
     """Parse WRITE_FILE: blocks from an agent response.
@@ -612,54 +642,126 @@ def sanitize_run_command(command: str) -> str:
     return command
 
 
+def extract_tool_operations(response: str) -> list[tuple[str, ...]]:
+    operations: list[tuple[str, ...]] = []
+    lines = response.splitlines()
+    i = 0
+
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if not stripped:
+            i += 1
+            continue
+
+        if stripped.startswith("WRITE_FILE:"):
+            path = stripped[len("WRITE_FILE:"):].strip()
+            j = i + 1
+
+            while j < len(lines) and lines[j].strip() == "":
+                j += 1
+
+            if j < len(lines) and lines[j].strip() == "---":
+                j += 1
+                content_lines = []
+                while j < len(lines) and lines[j].strip() != "---":
+                    content_lines.append(lines[j])
+                    j += 1
+                if j < len(lines):
+                    j += 1
+                    if path:
+                        operations.append(("WRITE_FILE", path, "\n".join(content_lines)))
+                        i = j
+                        continue
+
+            i += 1
+            continue
+
+        if stripped.startswith("WRITE_TO_MEMORY:"):
+            content = stripped[len("WRITE_TO_MEMORY:"):].strip()
+            if content:
+                operations.append(("WRITE_TO_MEMORY", content))
+            i += 1
+            continue
+
+        if stripped.startswith("READ_FROM_MEMORY:"):
+            key = stripped[len("READ_FROM_MEMORY:"):].strip()
+            if key:
+                operations.append(("READ_FROM_MEMORY", key))
+            i += 1
+            continue
+
+        if stripped.startswith("RUN:"):
+            command = stripped[len("RUN:"):].strip()
+            if command:
+                operations.append(("RUN", command))
+            i += 1
+            continue
+        
+        if stripped.starswith("READ_FILE:"):
+            path = stripped[len("READ_FILE:"):].strip()
+            if path:
+                operations.append(("READ_FILE", path))
+
+        i += 1
+
+    return operations
+
+
 def handle_tool_calls(response: str) -> str:
     if not response:
         return "[No response received from agent]"
 
     tool_outputs = []
 
-    # ── WRITE_FILE: takes priority over RUN: ─────────────────────────────────
-    write_blocks = extract_write_file_blocks(response)
-    if write_blocks:
-        path, content = write_blocks[0]
-        print(f"\n  {C.YELLOW}✎ Writing file:{C.RESET} {path}")
-        result = write_file_to_disk(path, content)
-        print(f"  {C.DIM}→ {result}{C.RESET}")
-        tool_outputs.append(result)
-        if len(write_blocks) > 1:
-            tool_outputs.append(
-                f"WARNING: Ignored {len(write_blocks) - 1} extra WRITE_FILE block(s). Only one is processed per turn."
-            )
-        # Also warn if there were RUN: lines mixed in with WRITE_FILE:
-        run_matches = extract_run_commands(response)
-        if run_matches:
-            tool_outputs.append(
-                "WARNING: RUN: commands found alongside WRITE_FILE: block. RUN: was ignored. Issue RUN: in a separate turn."
-            )
-        return response + "\n\nTOOL OUTPUT:\n" + "\n---\n".join(tool_outputs)
-
-    # ── RUN: fallback ─────────────────────────────────────────────────────────
-    matches = extract_run_commands(response)
-    if not matches:
+    operations = extract_tool_operations(response)
+    if not operations:
         return response
 
-    raw_command = matches[0].strip()
-    command = sanitize_run_command(raw_command)
-    if not command:
-        tool_outputs.append(
-            f"WARNING: Could not parse a valid shell command from RUN: {raw_command}"
-        )
-        return response + "\n\nTOOL OUTPUT:\n" + "\n---\n".join(tool_outputs)
+    for operation in operations:
+        kind = operation[0]
 
-    print(f"\n  {C.YELLOW}⚙ Executing:{C.RESET} {command}")
-    result = run_command(command)
-    print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
-    tool_outputs.append(f"$ {command}\n{result}")
+        if kind == "WRITE_FILE":
+            _, path, content = operation
+            print(f"\n  {C.YELLOW}✎ Writing file:{C.RESET} {path}")
+            result = write_file_to_disk(path, content)
+            print(f"  {C.DIM}→ {result}{C.RESET}")
+            tool_outputs.append(result)
+            continue
 
-    if len(matches) > 1:
-        tool_outputs.append(
-            f"WARNING: Ignored {len(matches) - 1} extra RUN lines. Only one RUN is executed per turn."
-        )
+        if kind == "WRITE_TO_MEMORY:":
+            _, content = operation
+            write_to_persistent_memory(content)
+            result = "Wrote content to persistent memory!"
+            print(f"\n  {C.YELLOW}🧠 Memory write:{C.RESET} {content[:120]}")
+            print(f"  {C.DIM}→ {result}{C.RESET}")
+            tool_outputs.append(result)
+            continue
+
+        if kind == "READ_FROM_MEMORY":
+            _, key = operation
+            memory_content = read_persistent_memory().strip()
+            result = memory_content if memory_content else "(memory empty)"
+            print(f"\n  {C.YELLOW}🧠 Memory read:{C.RESET} {key}")
+            print(f"  {C.DIM}→ {result[:300]}{C.RESET}")
+            tool_outputs.append(f"READ_FROM_MEMORY: {key}\n{result}")
+            continue
+
+        if kind == "RUN":
+            _, raw_command = operation
+            command = sanitize_run_command(raw_command)
+            if not command:
+                tool_outputs.append(
+                    f"WARNING: Could not parse a valid shell command from RUN: {raw_command}"
+                )
+                continue
+
+            print(f"\n  {C.YELLOW}⚙ Executing:{C.RESET} {command}")
+            result = run_command(command)
+            print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
+            tool_outputs.append(f"$ {command}\n{result}")
+
+    if not tool_outputs:
+        return response
 
     return response + "\n\nTOOL OUTPUT:\n" + "\n---\n".join(tool_outputs)
 
