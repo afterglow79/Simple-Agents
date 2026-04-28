@@ -4,7 +4,7 @@ import os
 import openai
 import random
 import httpx
-
+import BeautifulSoup
 import requests
 from openai import OpenAI
 import time
@@ -14,18 +14,21 @@ import argparse
 import subprocess
 import re
 import json
+from googlesearch import search
 
 parser = argparse.ArgumentParser(description="Tandem agentic AI operations.")
 
 parser.add_argument("--max_turns", type=int, default=25)
 parser.add_argument("--task", type=str)
 parser.add_argument("--init_planning_turns", type=int, default = 6)
+parser.add_argument("--can_use_web_search", type=bool, default=False)
 
 args = parser.parse_args()
 
 max_turns = args.max_turns
 task = args.task
 n_planning_turns = args.init_planning_turns
+can_search = args.can_use_web_search
 WORKSPACE_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 if task and os.path.exists(task):  ## allow user to pass through files for longer or more complex tasks.
@@ -150,6 +153,28 @@ def print_turn_timing(agent_name: str, elapsed: float):
 
 # ── System prompts ────────────────────────────────────────────────────────────
 
+WEB_SEARCH_INSTRUCTIONS = f"""
+
+════════════════════════════════════════
+TOOL: WRITE FILE (PREFERRED FOR ALL CODE FILES)
+════════════════════════════════════════
+
+Use SEARCH_WEB: to search something on the web. Do not use this excessively, only when you need to confirm or deny something, or discover how to do something.
+
+FORMAT:
+    SEARCH_WEB: "your query here"
+
+CORRECT EXAMPLE:
+    SEARCH_WEB: "How to write a python script that lists files in a directory?"
+    SEARCH_WEB: "How to use the requests library in python?"
+    SEARCH_WEB: "What color is the sky on a clear day?"
+
+INCORRECT EXAMPLE:
+    SEARCH_WEB: "What is the weather today?"  <- do not ask for information you can easily find out with a simple python script. Use SEARCH_WEB: for questions that require more complex understanding or synthesis of information, not for trivial facts.
+    SEARCH_WEB: "How to write a python script that lists files in a directory?"\n\nRUN: python3 list_files.py  <- do not include tool calls other than SEARCH_WEB: in your search query. Only put the question you want to ask the web search tool, nothing else.
+    SEARCH_WEB: "How to write a python script that lists files in a directory?"\n\nWRITE_FILE: list_files.py\n---\nimport os\nprint(os.listdir('.'))\n---  <- do not include file writes or any other tool calls in your search query. Only put the question you want to ask the web search tool, nothing else.
+    """
+ ## todo from googlesearch import search; for result in search("your query", num=10): print(result)
 TOOL_INSTRUCTIONS = f"""
 ════════════════════════════════════════
 TOOL: WRITE FILE (PREFERRED FOR ALL CODE FILES)
@@ -233,6 +258,10 @@ INCORRECT EXAMPLES:
     READ_FROM_MEMORY: "specific key" <- there are no keys, this command simply returns the entire memory content. Do not include extra text after READ_FROM_MEMORY.
 
 For the first {n_planning_turns} turns, only the PLANNERs can interact with each other. They will take this time to refine their plan fully, before delegating it off to the CODERs.
+
+
+
+{WEB_SEARCH_INSTRUCTIONS if can_search else "You are not able to search the web for answers, so do not attempt to."}
 
 ════════════════════════════════════════
 CRITICAL RULES — FOLLOW EVERY ONE:
@@ -557,6 +586,12 @@ def read_file(path: str) -> str:
     with open(path, "r") as f:
         return f.read()
 
+def search_web(query: str) -> str:
+    results = []
+    for url in search(query, num=10, stop=10, pause=2):
+        results.append(url)
+    return "\n".join(results) if results else "No results found."
+
 def extract_run_commands(response: str) -> list[str]:
     commands = []
     for line in response.splitlines():
@@ -759,6 +794,13 @@ def handle_tool_calls(response: str) -> str:
             result = run_command(command)
             print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
             tool_outputs.append(f"$ {command}\n{result}")
+        
+        if kind == "READ_FILE":
+            _, path = operation
+            print(f"\n  {C.YELLOW}📖 Reading file:{C.RESET} {path}")
+            result = read_file(path)
+            print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
+            tool_outputs.append(f"READ_FILE: {path}\n{result}")
 
     if not tool_outputs:
         return response
