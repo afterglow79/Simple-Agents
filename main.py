@@ -321,6 +321,7 @@ CRITICAL RULES — FOLLOW EVERY ONE:
     ALWAYS call the tooling agent by going "TOOLING_AGENT," and then your request. Your request can be anything the tooling agent can do, mentioned prior.
     The request can be as broad or as specific as you want. You must clearly state what you want done, what outputs you are looking for, and anything else that can be left up to interpertation, 
     as the tooling agent will take your request and attempt to figure out what you want. 
+    NEVER, EVER, do RUN: commands by yourself. always pass them to the tooling agent.
 
 2. ALWAYS USE ABSOLUTE PATHS WITH DRIVE LETTERS.
    Never use relative paths. Always use full Windows paths like C:\\path\\to\\file.py.
@@ -653,8 +654,16 @@ Ignore any out of place punctuation or numbers.
 for file in os.listdir(os.path.join(WORKSPACE_ROOT, "agent", "tools")):
     if file.endswith(".txt"):
         filepath = os.path.join(WORKSPACE_ROOT, "agent", "tools", file)
-        with open(filepath, "r") as f:
-            TOOLING_AGENT_SYSTEM += f.read()
+        # Try UTF-8 first, fall back to cp1252 and use replacement on errors
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                TOOLING_AGENT_SYSTEM += f.read()
+        except UnicodeDecodeError:
+            with open(filepath, "r", encoding="cp1252", errors="replace") as f:
+                TOOLING_AGENT_SYSTEM += f.read()
+        except Exception:
+            continue
+
 
 # ── Command execution ─────────────────────────────────────────────────────────
 
