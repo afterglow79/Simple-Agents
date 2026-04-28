@@ -980,7 +980,7 @@ def read_b64(path):
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode()
 
-def call_tooling_agent(goals: str) -> str:
+def call_tooling_agent(goals: str) -> str: ## IT WORKS THANK GOD
 
     system = TOOLING_AGENT_SYSTEM
 
