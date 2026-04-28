@@ -265,7 +265,7 @@ WRONG — DO NOT DO THESE:
 ════════════════════════════════════════
 TOOL: READ/WRITE TO PERSISTENT MEMORY
 ════════════════════════════════════════
-Use: "WRITE_TO_MEMORY: content" to save important information to persistent memory across that will be used across runs and to communicate critical bits of information with other agents. You should not use this liberally.
+Use: "WRITE_TO_MEMORY: content" to save important information to persistent memory across that will be used across runs and to communicate critical bits of information with other agents. You should not use this liberally, but use it to save important information.
 Use: "READ_FROM_MEMORY" to read the entire contents of the persistent memory. This is useful for recalling important information that other agents have written, or that you have written in previous turns. Do not use this to read back large amounts of data that you just wrote — you should already have that information in your current context. Only use READ_FROM_MEMORY when you need to recall something important that was written long ago or by another agent.
 
 CORRECT EXAMPLES:
