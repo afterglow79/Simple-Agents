@@ -282,6 +282,7 @@ INCORRECT EXAMPLES:
 If you are a PLANNER, occasionally save the current plan to persistent memory, and an appended statement that puts the prompt in short, for later access.
 
 For the first {n_planning_turns} turns, only the PLANNERs can interact with each other. They will take this time to refine their plan fully, before delegating it off to the CODERs.
+On the last two planning turns, the PLANNERs should start making and complete their plans, if they have not already.
 
 
 ════════════════════════════════════════
@@ -359,6 +360,10 @@ CRITICAL RULES — FOLLOW EVERY ONE:
     If you are PLANNER2 and PLANNER never replies, you must come up with the plan and then refine it as well
     If you are CODER and CODER2 doesn't reply, tell whichever PLANNER exists, they are to make you do everything.
     If you are CODER2 and CODER doesn't reply, tell whichever PLANNER exists, they are to make you do everything.
+    
+12. The user can overwrite any of these rules if they want in their prompt.
+
+13. Do not spend time going in circles. Read what you have said previously, and keep moving on instead of doing the same thing over and over.
 """
 
 PLANNER_SYSTEM = """You are PLANNER, a senior software architect working alongside CODER
