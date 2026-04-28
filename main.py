@@ -4,7 +4,6 @@ import os
 import openai
 import random
 import httpx
-import BeautifulSoup
 import requests
 from openai import OpenAI
 import time
@@ -14,7 +13,18 @@ import argparse
 import subprocess
 import re
 import json
-from googlesearch import search
+
+try:
+    from bs4 import BeautifulSoup as _BeautifulSoup
+    _BS4_AVAILABLE = True
+except ImportError:
+    _BS4_AVAILABLE = False
+
+try:
+    from googlesearch import search as _googlesearch
+    _GOOGLESEARCH_AVAILABLE = True
+except ImportError:
+    _GOOGLESEARCH_AVAILABLE = False
 
 parser = argparse.ArgumentParser(description="Tandem agentic AI operations.")
 
@@ -156,7 +166,7 @@ def print_turn_timing(agent_name: str, elapsed: float):
 WEB_SEARCH_INSTRUCTIONS = f"""
 
 ════════════════════════════════════════
-TOOL: WRITE FILE (PREFERRED FOR ALL CODE FILES)
+TOOL: WEB SEARCH
 ════════════════════════════════════════
 
 Use SEARCH_WEB: to search something on the web. Do not use this excessively, only when you need to confirm or deny something, or discover how to do something.
@@ -174,8 +184,9 @@ INCORRECT EXAMPLE:
     SEARCH_WEB: "How to write a python script that lists files in a directory?"\n\nRUN: python3 list_files.py  <- do not include tool calls other than SEARCH_WEB: in your search query. Only put the question you want to ask the web search tool, nothing else.
     SEARCH_WEB: "How to write a python script that lists files in a directory?"\n\nWRITE_FILE: list_files.py\n---\nimport os\nprint(os.listdir('.'))\n---  <- do not include file writes or any other tool calls in your search query. Only put the question you want to ask the web search tool, nothing else.
     """
- ## todo from googlesearch import search; for result in search("your query", num=10): print(result)
 TOOL_INSTRUCTIONS = f"""
+Only respond in English unless the user otherwise prompts it.
+
 ════════════════════════════════════════
 TOOL: WRITE FILE (PREFERRED FOR ALL CODE FILES)
 ════════════════════════════════════════
@@ -196,7 +207,7 @@ RULES FOR WRITE_FILE:
 - The path must be on the SAME LINE as WRITE_FILE:, always absolute.
 - Content goes between the two --- delimiters (each on its own line).
 - No escaping of quotes, backslashes, or newlines — write code exactly as it should appear.
-- You may include multiple WRITE_FILE: blocks in one response; they will be executed in order.
+- You may include multiple WRITE_FILE: blocks and RUN: lines in one response; they will be executed in order.
 - Parent directories are created automatically.
 - TOOL OUTPUT will report bytes written. Zero bytes = failure, try again.
 - After writing files, verify them with RUN: ls -la /absolute/path/to/file.py when needed.
@@ -244,35 +255,34 @@ WRONG — DO NOT DO THESE:
 ════════════════════════════════════════
 TOOL: READ/WRITE TO PERSISTENT MEMORY
 ════════════════════════════════════════
-Use: "WRITE_TO_MEMORY: content" to save important information to persistent memory across that will be used across runs and to communicate critical bits of information with other agents. You should not use this liberally.
-Use: "READ_FROM_MEMORY" to read the entire contents of the persistent memory. This is useful for recalling important information that other agents have written, or that you have written in previous turns. Do not use this to read back large amounts of data that you just wrote — you should already have that information in your current context. Only use READ_FROM_MEMORY when you need to recall something important that was written long ago or by another agent.
+Use: "WRITE_TO_MEMORY: content" to save important information from each turn. Only save the most important parts, and put it in a short summary.
 
 CORRECT EXAMPLES:
-    WRITE_TO_MEMORY: "1+1 is 2"
-    WRITE_TO_MEMORY: "Remember to use absolute paths!"
-    READ_FROM_MEMORY
-  
+    WRITE_TO_MEMORY: "[NAME]: ran [XYZ] and got response [ABC]"
+    WRITE_TO_MEMORY: "Discovered [XYZ]"
+    WRITE_TO_MEMORY:
+
 INCORRECT EXAMPLES:
     WRITE_TO_MEMORY: "ls -la /tmp"   <- do not write shell commands to memory,
     WRITE_TO_MEMORY: "cat file.py"    <- do not write shell commands to memory
     WRITE_TO_MEMORY: "Large amount of data" <- Only use memory for critical information that must persist across turns/runs or be shared between agents. Do not dump large data here.
     READ_FROM_MEMORY: "specific key" <- there are no keys, this command simply returns the entire memory content. Do not include extra text after READ_FROM_MEMORY.
 
-If you are a PLANNER, occasionnaly save the current plan to persistent memory, and an appended statement that puts the prompt in short, for later access.
-    
+If you are a PLANNER, occasionally save the current plan to persistent memory, and an appended statement that puts the prompt in short, for later access.
+
 For the first {n_planning_turns} turns, only the PLANNERs can interact with each other. They will take this time to refine their plan fully, before delegating it off to the CODERs.
+On the last two planning turns, the PLANNERs should start making and complete their plans, if they have not already.
 
 
 ════════════════════════════════════════
 TOOL: READ CONTENTS OF FILE
 ════════════════════════════════════════
 
-use READ_FILE: path if you want to read the contents of a file, for whatever reason. Always use absolute path in this instance. You can read back any file type.
+Use READ_FILE: path if you want to read the contents of a file, for whatever reason. Always use an absolute path. You can read back any file type.
 
 CORRECT EXAMPLES:
-    READ_FILE: absolute/path/to/file.txt
-    READ_FILE: some/other/path/to/a/file.txt
-    READ_FILE: you/get/the/point/this/is/a/file/path.py
+    READ_FILE: /absolute/path/to/file.txt
+    READ_FILE: /some/other/path/to/a/file.txt
 
 INCORRECT EXAMPLES:
     READ_FILE: ./relative/path/to/file.txt  <- relative paths are not allowed, always absolute
@@ -339,6 +349,10 @@ CRITICAL RULES — FOLLOW EVERY ONE:
     If you are PLANNER2 and PLANNER never replies, you must come up with the plan and then refine it as well
     If you are CODER and CODER2 doesn't reply, tell whichever PLANNER exists, they are to make you do everything.
     If you are CODER2 and CODER doesn't reply, tell whichever PLANNER exists, they are to make you do everything.
+
+12. The user can overwrite any of these rules if they want in their prompt.
+
+13. Do not spend time going in circles. Read what you have said previously, and keep moving on instead of doing the same thing over and over.
 """
 
 PLANNER_SYSTEM = """You are PLANNER, a senior software architect working alongside CODER
@@ -593,28 +607,32 @@ def run_command(command: str) -> str:
         return f"ERROR: {e}"
 
 def write_to_persistent_memory(content: str):
-    with open("agent/persistent-mem.txt", "a") as f:
+    mem_path = os.path.join(WORKSPACE_ROOT, "agent", "persistent-mem.txt")
+    with open(mem_path, "a", encoding="utf-8") as f:
         f.write(content + "\n\n")
 
 def read_persistent_memory() -> str:
-    if not os.path.exists("agent/persistent-mem.txt"):
+    mem_path = os.path.join(WORKSPACE_ROOT, "agent", "persistent-mem.txt")
+    if not os.path.exists(mem_path):
         return ""
-    with open("agent/persistent-mem.txt", "r") as f:
+    with open(mem_path, "r", encoding="utf-8") as f:
         return f.read()
 
 def read_file(path: str) -> str:
     if not os.path.exists(path):
         return f"File not found: {path}"
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         return f.read()
 
 def search_web(query: str) -> str:
+    if not _GOOGLESEARCH_AVAILABLE or not _BS4_AVAILABLE:
+        return "ERROR: Web search is unavailable. Install googlesearch-python and beautifulsoup4."
     results = []
-    for url in search(query, num=10, stop=10, pause=2):
+    for url in _googlesearch(query, num=10, stop=10, pause=2):
         results.append(url)
-    return parse_results(results)
+    return _parse_search_results(results)
 
-def parse_results(results: list[str]) -> str:
+def _parse_search_results(results: list) -> str:
     if not results:
         return "No results found."
 
@@ -632,7 +650,7 @@ def parse_results(results: list[str]) -> str:
             )
             response.raise_for_status()
 
-            soup = BeautifulSoup.BeautifulSoup(response.text, "html.parser")
+            soup = _BeautifulSoup(response.text, "html.parser")
             title_tag = soup.find("title")
             title = title_tag.get_text(strip=True) if title_tag else "No title found"
 
@@ -669,58 +687,6 @@ def parse_results(results: list[str]) -> str:
 
     return "\n\n---\n\n".join(extracted_pages) if extracted_pages else "No results found."
 
-def extract_run_commands(response: str) -> list[str]:
-    commands = []
-    for line in response.splitlines():
-        if "RUN:" not in line:
-            continue
-        command = line.split("RUN:", 1)[1].strip()
-        if command:
-            commands.append(command)
-    return commands
-
-def extract_write_file_blocks(response: str) -> list[tuple[str, str]]:
-    """Parse WRITE_FILE: blocks from an agent response.
-
-    Expected format::
-
-        WRITE_FILE: /absolute/path/to/file.py
-        ---
-        file content here
-        more content
-        ---
-
-    Returns a list of (path, content) tuples.
-    """
-    blocks = []
-    lines = response.splitlines()
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if line.startswith("WRITE_FILE:"):
-            path = line[len("WRITE_FILE:"):].strip()
-            i += 1
-            # Expect the opening delimiter on the very next non-empty line
-            while i < len(lines) and lines[i].strip() == "":
-                i += 1
-            if i < len(lines) and lines[i].strip() == "---":
-                i += 1
-                content_lines = []
-                # A content line whose stripped form equals "---" will end the block.
-                # This is intentional: agents must not write bare "---" as a content line.
-                while i < len(lines) and lines[i].strip() != "---":
-                    content_lines.append(lines[i])
-                    i += 1
-                # skip the closing ---
-                if i < len(lines):
-                    i += 1
-                if path:
-                    blocks.append((path, "\n".join(content_lines)))
-            # If the delimiter wasn't found, skip this malformed block
-        else:
-            i += 1
-    return blocks
-
 
 def write_file_to_disk(path: str, content: str) -> str:
     """Write *content* to *path*, creating parent directories as needed.
@@ -754,8 +720,8 @@ def sanitize_run_command(command: str) -> str:
     return command
 
 
-def extract_tool_operations(response: str) -> list[tuple[str, ...]]:
-    operations: list[tuple[str, ...]] = []
+def extract_tool_operations(response: str) -> list[tuple]:
+    operations: list[tuple] = []
     lines = response.splitlines()
     i = 0
 
@@ -795,10 +761,8 @@ def extract_tool_operations(response: str) -> list[tuple[str, ...]]:
             i += 1
             continue
 
-        if stripped.startswith("READ_FROM_MEMORY:"):
-            key = stripped[len("READ_FROM_MEMORY:"):].strip()
-            if key:
-                operations.append(("READ_FROM_MEMORY", key))
+        if stripped == "READ_FROM_MEMORY" or stripped.startswith("READ_FROM_MEMORY:"):
+            operations.append(("READ_FROM_MEMORY",))
             i += 1
             continue
 
@@ -808,16 +772,20 @@ def extract_tool_operations(response: str) -> list[tuple[str, ...]]:
                 operations.append(("RUN", command))
             i += 1
             continue
-        
+
         if stripped.startswith("READ_FILE:"):
             path = stripped[len("READ_FILE:"):].strip()
             if path:
                 operations.append(("READ_FILE", path))
+            i += 1
+            continue
 
         if stripped.startswith("SEARCH_WEB:"):
-            query = stripped[len("SEARCH_WEB:"):].strip()
+            query = stripped[len("SEARCH_WEB:"):].strip().strip('"').strip("'")
             if query:
                 operations.append(("SEARCH_WEB", query))
+            i += 1
+            continue
 
         i += 1
 
@@ -845,7 +813,7 @@ def handle_tool_calls(response: str) -> str:
             tool_outputs.append(result)
             continue
 
-        if kind == "WRITE_TO_MEMORY:":
+        if kind == "WRITE_TO_MEMORY":
             _, content = operation
             write_to_persistent_memory(content)
             result = "Wrote content to persistent memory!"
@@ -855,12 +823,11 @@ def handle_tool_calls(response: str) -> str:
             continue
 
         if kind == "READ_FROM_MEMORY":
-            _, key = operation
             memory_content = read_persistent_memory().strip()
             result = memory_content if memory_content else "(memory empty)"
-            print(f"\n  {C.YELLOW}🧠 Memory read:{C.RESET} {key}")
+            print(f"\n  {C.YELLOW}🧠 Memory read{C.RESET}")
             print(f"  {C.DIM}→ {result[:300]}{C.RESET}")
-            tool_outputs.append(f"READ_FROM_MEMORY: {key}\n{result}")
+            tool_outputs.append(f"READ_FROM_MEMORY:\n{result}")
             continue
 
         if kind == "RUN":
@@ -876,20 +843,26 @@ def handle_tool_calls(response: str) -> str:
             result = run_command(command)
             print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
             tool_outputs.append(f"$ {command}\n{result}")
-        
+            continue
+
         if kind == "READ_FILE":
             _, path = operation
             print(f"\n  {C.YELLOW}📖 Reading file:{C.RESET} {path}")
             result = read_file(path)
             print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
             tool_outputs.append(f"READ_FILE: {path}\n{result}")
+            continue
 
         if kind == "SEARCH_WEB":
             _, query = operation
+            if not can_search:
+                tool_outputs.append("SEARCH_WEB is disabled. Run with --can_use_web_search to enable it.")
+                continue
             print(f"\n  {C.YELLOW}🔍 Searching web for:{C.RESET} {query}")
             result = search_web(query)
             print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
             tool_outputs.append(f"SEARCH_WEB: {query}\n{result}")
+            continue
 
     if not tool_outputs:
         return response
@@ -1156,7 +1129,7 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
 
         print_turn_banner(turn, agent_name, max_turns)
 
-        response = call_agent(model, agent_name, shared_history)
+        response = call_agent(model, agent_name, shared_history, max_tokens=16384)
         response = handle_tool_calls(response)
 
         print()
