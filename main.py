@@ -227,10 +227,12 @@ FORMAT — emit this on its own line, no other text on that line:
 RUN: <shell command>
 
 CORRECT EXAMPLES:
-RUN: mkdir -p {WORKSPACE_ROOT}/myproject
-RUN: ls -la {WORKSPACE_ROOT}/myproject
-RUN: cat {WORKSPACE_ROOT}/myproject/main.py
-RUN: python3 {WORKSPACE_ROOT}/myproject/main.py
+  RUN: mkdir -p {WORKSPACE_ROOT}/myproject
+  RUN: ls -la {WORKSPACE_ROOT}/myproject
+  RUN: cat {WORKSPACE_ROOT}/myproject/main.py
+  RUN: python3 {WORKSPACE_ROOT}/myproject/main.py
+  RUN: python -m py_compile filename.py <- to check if a python file compiles. You should occasionally do this if you are writing in Python.
+
 
 WRONG — DO NOT DO THESE:
   RUN: `mkdir /foo`              <- no backticks ever
@@ -257,8 +259,27 @@ INCORRECT EXAMPLES:
     WRITE_TO_MEMORY: "Large amount of data" <- Only use memory for critical information that must persist across turns/runs or be shared between agents. Do not dump large data here.
     READ_FROM_MEMORY: "specific key" <- there are no keys, this command simply returns the entire memory content. Do not include extra text after READ_FROM_MEMORY.
 
+If you are a PLANNER, occasionnaly save the current plan to persistent memory, and an appended statement that puts the prompt in short, for later access.
+    
 For the first {n_planning_turns} turns, only the PLANNERs can interact with each other. They will take this time to refine their plan fully, before delegating it off to the CODERs.
 
+
+════════════════════════════════════════
+TOOL: READ CONTENTS OF FILE
+════════════════════════════════════════
+
+use READ_FILE: path if you want to read the contents of a file, for whatever reason. Always use absolute path in this instance. You can read back any file type.
+
+CORRECT EXAMPLES:
+    READ_FILE: absolute/path/to/file.txt
+    READ_FILE: some/other/path/to/a/file.txt
+    READ_FILE: you/get/the/point/this/is/a/file/path.py
+
+INCORRECT EXAMPLES:
+    READ_FILE: ./relative/path/to/file.txt  <- relative paths are not allowed, always absolute
+    READ_FILE: file.txt                   <- relative paths are not allowed, always absolute
+    READ_FILE: /absolute/path/to/directory/  <- you must specify a file, not a directory
+    READ_FILE: something <- do not include extra text, only the command and the absolute file path.
 
 
 {WEB_SEARCH_INSTRUCTIONS if can_search else "You are not able to search the web for answers, so do not attempt to."}
@@ -590,7 +611,62 @@ def search_web(query: str) -> str:
     results = []
     for url in search(query, num=10, stop=10, pause=2):
         results.append(url)
-    return "\n".join(results) if results else "No results found."
+    return parse_results(results)
+
+def parse_results(results: list[str]) -> str:
+    if not results:
+        return "No results found."
+
+    extracted_pages = []
+    for url in results:
+        if not isinstance(url, str) or not url.strip():
+            continue
+
+        url = url.strip()
+        try:
+            response = requests.get(
+                url,
+                timeout=10,
+                headers={"User-Agent": "100-Academics/5.0 Simple-Agents/1.0"},
+            )
+            response.raise_for_status()
+
+            soup = BeautifulSoup.BeautifulSoup(response.text, "html.parser")
+            title_tag = soup.find("title")
+            title = title_tag.get_text(strip=True) if title_tag else "No title found"
+
+            description = ""
+            meta_description = soup.find("meta", attrs={"name": re.compile(r"^description$", re.I)})
+            if meta_description and meta_description.get("content"):
+                description = meta_description["content"].strip()
+            else:
+                og_description = soup.find("meta", attrs={"property": re.compile(r"^og:description$", re.I)})
+                if og_description and og_description.get("content"):
+                    description = og_description["content"].strip()
+
+            content_blocks = []
+            for tag in soup.select("h1, h2, h3, p, li"):
+                text = tag.get_text(" ", strip=True)
+                if text:
+                    content_blocks.append(text)
+                if len(content_blocks) >= 12:
+                    break
+
+            excerpt = " ".join(content_blocks).strip()
+            if len(excerpt) > 700:
+                excerpt = excerpt[:700].rstrip() + "..."
+
+            page_lines = [f"URL: {url}", f"Title: {title}"]
+            if description:
+                page_lines.append(f"Description: {description}")
+            if excerpt:
+                page_lines.append(f"Excerpt: {excerpt}")
+
+            extracted_pages.append("\n".join(page_lines))
+        except Exception as e:
+            extracted_pages.append(f"URL: {url}\nERROR: {e}")
+
+    return "\n\n---\n\n".join(extracted_pages) if extracted_pages else "No results found."
 
 def extract_run_commands(response: str) -> list[str]:
     commands = []
@@ -732,10 +808,15 @@ def extract_tool_operations(response: str) -> list[tuple[str, ...]]:
             i += 1
             continue
         
-        if stripped.starswith("READ_FILE:"):
+        if stripped.startswith("READ_FILE:"):
             path = stripped[len("READ_FILE:"):].strip()
             if path:
                 operations.append(("READ_FILE", path))
+
+        if stripped.startswith("SEARCH_WEB:"):
+            query = stripped[len("SEARCH_WEB:"):].strip()
+            if query:
+                operations.append(("SEARCH_WEB", query))
 
         i += 1
 
@@ -801,6 +882,13 @@ def handle_tool_calls(response: str) -> str:
             result = read_file(path)
             print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
             tool_outputs.append(f"READ_FILE: {path}\n{result}")
+
+        if kind == "SEARCH_WEB":
+            _, query = operation
+            print(f"\n  {C.YELLOW}🔍 Searching web for:{C.RESET} {query}")
+            result = search_web(query)
+            print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
+            tool_outputs.append(f"SEARCH_WEB: {query}\n{result}")
 
     if not tool_outputs:
         return response
