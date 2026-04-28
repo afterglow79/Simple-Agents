@@ -231,8 +231,7 @@ CORRECT EXAMPLES:
   RUN: ls -la {WORKSPACE_ROOT}/myproject
   RUN: cat {WORKSPACE_ROOT}/myproject/main.py
   RUN: python3 {WORKSPACE_ROOT}/myproject/main.py
-  RUN: python -m py_compile filename.py <- to check if a python file compiles. You should occasionally do this if you are writing in Python.
-
+  RUN: python3 -m py_compile filename.py <- to check if a python file compiles. You do this after every turn if you are a CODER and writing in Python.
 
 WRONG — DO NOT DO THESE:
   RUN: `mkdir /foo`              <- no backticks ever
@@ -384,6 +383,7 @@ Never write DONE: if any TOOL OUTPUT in the session showed an unresolved error.
 COMPLETION:
 Write DONE: only after you have personally run RUN: ls -la on the project directory
 and seen every required file listed with non-zero size in TOOL OUTPUT.
+You must also RUN: python3 -m py_compile filename.py on every python file to confirm it compiles without error before you can consider it done.
 Include the verified file list in your DONE: summary.
 """ + TOOL_INSTRUCTIONS
 
@@ -431,6 +431,7 @@ Never write DONE: if any TOOL OUTPUT in the session showed an unresolved error.
 COMPLETION:
 Write DONE: only after you have personally run RUN: ls -la on the project directory
 and seen every required file listed with non-zero size in TOOL OUTPUT.
+You must also RUN: python3 -m py_compile filename.py on every python file to confirm it compiles without error before you can consider it done.
 Include the verified file list in your DONE: summary.
 """ + TOOL_INSTRUCTIONS
 
