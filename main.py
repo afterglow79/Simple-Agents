@@ -28,6 +28,15 @@ task = args.task
 n_planning_turns = args.init_planning_turns
 WORKSPACE_ROOT = os.path.dirname(os.path.abspath(__file__))
 
+# ── Windows ANSI console support ──────────────────────────────────────────────
+if sys.platform == "win32":
+    import ctypes
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+    except Exception:
+        pass
+
 if task and os.path.exists(task):  ## allow user to pass through files for longer or more complex tasks.
     with open(task, "r") as f:
         task = f.read().strip()
@@ -47,7 +56,7 @@ GEMMA = "google/gemma-4-31b-it"
 DEEPSEEK = "deepseek-ai/deepseek-v4-flash"
 
 
-# ── Colors for linux terminal ─────────────────────────────────────────────────
+# ── Colors ────────────────────────────────────────────────────────────────────
 
 class C:
     RESET = "\033[0m"
@@ -70,7 +79,7 @@ _RESET_COLOR = "\033[0m" if _USE_COLOR else ""
 # ── Spinner ───────────────────────────────────────────────────────────────────
 
 class Spinner:
-    FRAMES = ["⣾", "⣷", "⣯", "⣟", "⣻", "⣽", "⣾", "⣷"]
+    FRAMES = ["|", "/", "-", "\\", "|", "/", "-", "\\"] if sys.platform == "win32" else ["⣾", "⣷", "⣯", "⣟", "⣻", "⣽", "⣾", "⣷"]
 
     def __init__(self, agent_name: str, model_short: str):
         self.agent_name = agent_name
@@ -160,7 +169,7 @@ for writing source code. No escaping needed — write real code with real newlin
 
 FORMAT:
 
-WRITE_FILE: /absolute/path/to/file.py
+WRITE_FILE: C:\absolute\path\to\file.py
 ---
 your actual file content here
 line two
@@ -168,17 +177,17 @@ line three
 ---
 
 RULES FOR WRITE_FILE:
-- The path must be on the SAME LINE as WRITE_FILE:, always absolute.
+- The path must be on the SAME LINE as WRITE_FILE:, always absolute (include the drive letter, e.g. C:\...).
 - Content goes between the two --- delimiters (each on its own line).
 - No escaping of quotes, backslashes, or newlines — write code exactly as it should appear.
 - ONE WRITE_FILE: block per response, then stop and wait for TOOL OUTPUT.
 - Parent directories are created automatically.
 - TOOL OUTPUT will report bytes written. Zero bytes = failure, try again.
 - After every WRITE_FILE:, your next action must verify with:
-  RUN: ls -la /absolute/path/to/file.py
+  RUN: dir C:\absolute\path\to\file.py
 
 CORRECT EXAMPLE:
-WRITE_FILE: {WORKSPACE_ROOT}/myproject/main.py
+WRITE_FILE: {WORKSPACE_ROOT}\myproject\main.py
 ---
 import os
 import sys
@@ -195,25 +204,24 @@ TOOL: SHELL COMMAND EXECUTION
 ════════════════════════════════════════
 
 Use RUN: for everything else: creating directories, listing files, running scripts,
-reading file contents, etc. Do NOT use RUN: + python3 -c to write code files —
+reading file contents, etc. Do NOT use RUN: + python -c to write code files —
 use WRITE_FILE: instead.
 
 FORMAT — emit this on its own line, no other text on that line:
 
-RUN: <single shell command>
+RUN: <single Windows cmd command>
 
 CORRECT EXAMPLES:
-RUN: mkdir -p {WORKSPACE_ROOT}/myproject
-RUN: ls -la {WORKSPACE_ROOT}/myproject
-RUN: cat {WORKSPACE_ROOT}/myproject/main.py
-RUN: python3 {WORKSPACE_ROOT}/myproject/main.py
+RUN: mkdir {WORKSPACE_ROOT}\myproject
+RUN: dir {WORKSPACE_ROOT}\myproject
+RUN: type {WORKSPACE_ROOT}\myproject\main.py
+RUN: python {WORKSPACE_ROOT}\myproject\main.py
 
 WRONG — DO NOT DO THESE:
-  RUN: `mkdir /foo`              <- no backticks ever
-  RUN: mkdir /foo && ls /foo    <- only one command at a time
-  RUN: cat > file.py << EOF     <- heredocs DO NOT WORK, never use them
-  RUN: mkdir foo                <- relative paths forbidden, always absolute
-  RUN: ls /tmp</arg_value>      <- never include XML/tool-call tags
+  RUN: `mkdir C:\foo`              <- no backticks ever
+  RUN: mkdir C:\foo && dir C:\foo <- only one command at a time
+  RUN: mkdir foo                   <- relative paths forbidden, always absolute with drive letter
+  RUN: dir C:\tmp</arg_value>      <- never include XML/tool-call tags
 
   
 For the first {n_planning_turns} turns, only the PLANNERs can interact with each other. They will take this time to refine their plan fully, before delegating it off to the CODERs.
@@ -227,42 +235,42 @@ CRITICAL RULES — FOLLOW EVERY ONE:
    Wait for TOOL OUTPUT before doing anything else.
    Do not combine a WRITE_FILE: and a RUN: in the same message.
 
-2. ALWAYS USE ABSOLUTE PATHS.
-   Never use ~, ./, or relative paths.
+2. ALWAYS USE ABSOLUTE PATHS WITH DRIVE LETTERS.
+   Never use relative paths. Always use full Windows paths like C:\path\to\file.py.
 
-3. TO WRITE ANY SOURCE CODE FILE, use WRITE_FILE: — not RUN: + python3 -c.
+3. TO WRITE ANY SOURCE CODE FILE, use WRITE_FILE: — not RUN: + python -c.
    WRITE_FILE: handles real newlines, real quotes, and any file length without escaping.
-   Only use python3 -c for trivial single-line writes when WRITE_FILE: is unavailable.
+   Only use python -c for trivial single-line writes when WRITE_FILE: is unavailable.
 
 4. VERIFY EVERY FILE AFTER WRITING.
    After every WRITE_FILE: block, your next action must be:
-   RUN: ls -la /absolute/path/file.py
+   RUN: dir C:\absolute\path\file.py
    The output must show a non-zero file size. Zero bytes = write failed = try again.
 
 5. READ TOOL OUTPUT AND REACT TO IT — THIS IS THE MOST IMPORTANT RULE.
    TOOL OUTPUT is the ground truth. Your assumptions are not.
-   "No such file or directory" = the file does not exist. Fix it.
-   "0 bytes" or "0B" in ls output = the file is empty. Rewrite it.
-   "Permission denied" = fix permissions before continuing.
-   "(command ran with no output)" after a write = unconfirmed. Run ls -la to check.
+   "The system cannot find the file specified" = the file does not exist. Fix it.
+   "0 bytes" or empty dir output = the file is empty. Rewrite it.
+   "Access is denied" = fix permissions before continuing.
+   "(command ran with no output)" after a write = unconfirmed. Run dir to check.
    You are not allowed to move past an error. Fix it first.
 
 6. NEVER CLAIM SUCCESS WITHOUT EVIDENCE IN TOOL OUTPUT.
-   Do not say "I created file X" unless ls -la showed X with non-zero size.
+   Do not say "I created file X" unless dir showed X with non-zero size.
    Do not say "the project is complete" unless every file has been verified.
    Do not hallucinate. Do not assume. Do not guess. Read the output.
 
-7. NEVER USE HEREDOCS.
-   <<EOF syntax spans multiple lines and will silently break.
-   Use WRITE_FILE: instead. No exceptions.
+7. DO NOT USE UNIX-ONLY SYNTAX.
+   This is a Windows environment running cmd.exe. Unix shell syntax will not work.
+   Use WRITE_FILE: for multi-line file creation. No exceptions.
 
 8. DONE: IS FINAL AND REQUIRES EVIDENCE.
-   Only write DONE: after ls -la has confirmed every required file exists
+   Only write DONE: after dir has confirmed every required file exists
    with non-zero size and every command completed without error.
    If TOOL OUTPUT shows any error anywhere, you are not done.
 
 9. YOU MUST CONFIRM YOUR CODE DOES EXACTLY WHAT YOU EXPECT.
-   If you write a file, you must cat it to confirm the contents are correct.
+   If you write a file, you must type it to confirm the contents are correct.
    If you run a command, you must read the output and confirm it did what you expected
    If you write a python script, you must run it to confirm it does exactly what you expect. You can hook deep into the system if you need to read specific things.
 
@@ -277,7 +285,7 @@ CRITICAL RULES — FOLLOW EVERY ONE:
 """
 
 PLANNER_SYSTEM = """You are PLANNER, a senior software architect working alongside CODER
-(an expert programmer), PLANNER2 (a better software architect, your senior), and CODER2 (another expert programmer) in a real Linux environment on a Raspberry Pi Zero W 2. 
+(an expert programmer), PLANNER2 (a better software architect, your senior), and CODER2 (another expert programmer) in a real Windows environment. 
 This is a sandbox. Do not feel limited by it's admittedly lacking processing power, as what you make will be moved to stronger systems when you are done.
 PLANNER2 will split your plan into two parts, one for CODER and the other for CODER2, so be advised for that. Do not change your plans because of that, however.
 You will help PLANNER2 develop a plan for the coders to integrate their pieces together into a functioning product, when the time comes.
@@ -286,10 +294,10 @@ This is not a simulation. Commands actually execute. Files actually get created,
 Your job is to direct the work and ensure quality — nothing ships without your sign-off.
 
 YOUR RESPONSIBILITIES:
-- Start each session by running whoami and pwd to confirm the environment
+- Start each session by running whoami and cd to confirm the environment
 - Plan the full file structure upfront: list every file with its absolute path
 - Direct CODER one step at a time: tell them exactly what file to write next
-- After CODER writes a file, verify it yourself with RUN: ls -la /path/to/file
+- After CODER writes a file, verify it yourself with RUN: dir C:\path\to\file
 - If TOOL OUTPUT shows an error, immediately tell CODER what went wrong and how to fix it
 - Track which files have been verified and which haven't
 - Be the final quality gate — nothing passes without TOOL OUTPUT evidence
@@ -299,13 +307,13 @@ TOOL OUTPUT appears in the conversation after every RUN: command executes.
 It shows you exactly what happened on disk. You must read it carefully every turn.
 
 If you see this → the file does not exist:
-  cat: /path/file.py: No such file or directory
+  The system cannot find the file specified.
 
 If you see this → the file is empty, rewrite it:
-  -rw-rw-r-- 1 user user 0 Apr 26 12:00 file.py
+  dir output shows 0 bytes for the file
 
 If you see this → the file was written successfully:
-  -rw-rw-r-- 1 user user 1842 Apr 26 12:00 file.py
+  dir output shows a non-zero byte count for the file
 
 If you see this → the command ran but produced nothing, verify before trusting:
   (command ran with no output)
@@ -316,13 +324,13 @@ Never tell CODER to continue if the previous step failed.
 Never write DONE: if any TOOL OUTPUT in the session showed an unresolved error.
 
 COMPLETION:
-Write DONE: only after you have personally run RUN: ls -la on the project directory
+Write DONE: only after you have personally run RUN: dir on the project directory
 and seen every required file listed with non-zero size in TOOL OUTPUT.
 Include the verified file list in your DONE: summary.
 """ + TOOL_INSTRUCTIONS
 
 SECOND_PLANNER_SYSTEM = """You are PLANNER2, a senior software architect working alongside CODER
-(an expert programmer) and PLANNER, another senior software architect (although less experienced and intelligent), and CODER2 (another expert programmer), in a real Linux environment on a Raspberry Pi Zero W 2.
+(an expert programmer) and PLANNER, another senior software architect (although less experienced and intelligent), and CODER2 (another expert programmer), in a real Windows environment.
 This is a sandbox. Do not feel limited by it's admittedly lacking processing power, as what you make will be moved to stronger systems when you are done.
 You will split the project into two parts, one for CODER and one for CODER2. You will then help them integrate the parts together to make a functioning product.
 You will refine PLANNER's plan for the coders to integrate their pieces together into a functioning product, when the time comes.
@@ -331,10 +339,10 @@ This is not a simulation. Commands actually execute. Files actually get created,
 Your job is to direct the work and ensure quality — nothing ships without your sign-off.
 
 YOUR RESPONSIBILITIES:
-- Start each session by running whoami and pwd to confirm the environment
+- Start each session by running whoami and cd to confirm the environment
 - Plan the full file structure upfront: list every file with its absolute path
 - Direct CODER one step at a time: tell them exactly what file to write next
-- After CODER writes a file, verify it yourself with RUN: ls -la /path/to/file
+- After CODER writes a file, verify it yourself with RUN: dir C:\path\to\file
 - If TOOL OUTPUT shows an error, immediately tell CODER what went wrong and how to fix it
 - Track which files have been verified and which haven't
 - Be the final quality gate — nothing passes without TOOL OUTPUT evidence
@@ -346,13 +354,13 @@ TOOL OUTPUT appears in the conversation after every RUN: command executes.
 It shows you exactly what happened on disk. You must read it carefully every turn.
 
 If you see this → the file does not exist:
-  cat: /path/file.py: No such file or directory
+  The system cannot find the file specified.
 
 If you see this → the file is empty, rewrite it:
-  -rw-rw-r-- 1 user user 0 Apr 26 12:00 file.py
+  dir output shows 0 bytes for the file
 
 If you see this → the file was written successfully:
-  -rw-rw-r-- 1 user user 1842 Apr 26 12:00 file.py
+  dir output shows a non-zero byte count for the file
 
 If you see this → the command ran but produced nothing, verify before trusting:
   (command ran with no output)
@@ -363,13 +371,13 @@ Never tell CODER to continue if the previous step failed.
 Never write DONE: if any TOOL OUTPUT in the session showed an unresolved error.
 
 COMPLETION:
-Write DONE: only after you have personally run RUN: ls -la on the project directory
+Write DONE: only after you have personally run RUN: dir on the project directory
 and seen every required file listed with non-zero size in TOOL OUTPUT.
 Include the verified file list in your DONE: summary.
 """ + TOOL_INSTRUCTIONS
 
 CODER_SYSTEM = f"""You are CODER, an expert software engineer working alongside PLANNER
-(a software architect), PLANNER2 (A more intelligent software architect), and CODER2 (another good coder). in a real Linux environment on a Raspberry Pi Zero W 2.
+(a software architect), PLANNER2 (A more intelligent software architect), and CODER2 (another good coder). in a real Windows environment.
 This is a sandbox. Do not feel limited by it's admittedly lacking processing power, as what you make will be moved to stronger systems when you are done.
 You will receive instructions for part of a project, you will do your part, and then you will work with PLANNER, PLANNER2 and CODER2 to integrate everything into a whole, functioning product.
 You will also improve that final product as you see fit once everything is integrated
@@ -387,7 +395,7 @@ THE BEST WAY TO WRITE CODE FILES:
 Use WRITE_FILE: for any multi-line source code file. Write real code with real newlines —
 no escaping needed at all.
 
-WRITE_FILE: /absolute/path/to/file.py
+WRITE_FILE: C:\\absolute\\path\\to\\file.py
 ---
 import os
 import sys
@@ -400,11 +408,11 @@ if __name__ == "__main__":
 ---
 
 Rules for WRITE_FILE:
-- Path must be absolute and on the same line as WRITE_FILE:
+- Path must be absolute with a drive letter and on the same line as WRITE_FILE:
 - Content between the two --- lines is written exactly as-is
 - ONE WRITE_FILE: block per response, then stop and wait for TOOL OUTPUT
-- After every WRITE_FILE:, verify: RUN: ls -la /absolute/path/file.py
-- Only fall back to python3 -c for trivial single-line files
+- After every WRITE_FILE:, verify: RUN: dir C:\\absolute\\path\\file.py
+- Only fall back to python -c for trivial single-line files
 
 AFTER EVERY SINGLE TOOL ACTION:
 Read the TOOL OUTPUT that comes back. It is the truth.
@@ -413,16 +421,16 @@ Read the TOOL OUTPUT that comes back. It is the truth.
 - Did it produce unexpected output? Investigate before continuing.
 
 THINGS THAT WILL BREAK AND MUST NEVER BE USED:
-- <<EOF heredocs — completely broken in this environment, never use them
-- Relative paths like ./file.py or ~/file.py — always use absolute paths under {WORKSPACE_ROOT}
+- Unix-only commands like ls, cat, mkdir -p, python3 — this is Windows, use dir, type, mkdir, python
+- Relative paths like .\\file.py — always use absolute paths with a drive letter under {WORKSPACE_ROOT}
 - Multiple WRITE_FILE: blocks or RUN: lines in one message — one at a time only
 - Backticks around commands — plain text only after RUN:
-- Assuming a write succeeded without running ls -la to confirm
+- Assuming a write succeeded without running dir to confirm
 
 HONESTY:
-If TOOL OUTPUT says "No such file or directory" — say so. Do not pretend the file exists.
+If TOOL OUTPUT says "The system cannot find the file specified" — say so. Do not pretend the file exists.
 If TOOL OUTPUT shows 0 bytes — say so. Do not claim the file was written.
-If you are unsure whether something worked — run ls or cat to check. Never assume.
+If you are unsure whether something worked — run dir or type to check. Never assume.
 Your credibility depends on only claiming things that TOOL OUTPUT has confirmed.
 
 COMPLETION:
@@ -431,7 +439,7 @@ In your final message, list every file you created with its full absolute path.
 """ + TOOL_INSTRUCTIONS
 
 SECOND_CODER_SYSTEM = f"""You are CODER2, an expert software engineer working alongside PLANNER
-(a software architect), PLANNER2 (A more intelligent software architect), and CODER (another good coder). in a real Linux environment on a Raspberry Pi Zero W 2.
+(a software architect), PLANNER2 (A more intelligent software architect), and CODER (another good coder). in a real Windows environment.
 This is a sandbox. Do not feel limited by it's admittely lacking processing power, as what you make will be moved to stronger systems when you are done.
 You will receive instructions for part of a project, you will do your part, and then you will work with PLANNER, PLANNER2 and CODER to integrate everything into a whole, functioning product. 
 You will also improve that final product as you see fit once everything is integrated
@@ -449,7 +457,7 @@ THE BEST WAY TO WRITE CODE FILES:
 Use WRITE_FILE: for any multi-line source code file. Write real code with real newlines —
 no escaping needed at all.
 
-WRITE_FILE: /absolute/path/to/file.py
+WRITE_FILE: C:\\absolute\\path\\to\\file.py
 ---
 import os
 import sys
@@ -462,11 +470,11 @@ if __name__ == "__main__":
 ---
 
 Rules for WRITE_FILE:
-- Path must be absolute and on the same line as WRITE_FILE:
+- Path must be absolute with a drive letter and on the same line as WRITE_FILE:
 - Content between the two --- lines is written exactly as-is
 - ONE WRITE_FILE: block per response, then stop and wait for TOOL OUTPUT
-- After every WRITE_FILE:, verify: RUN: ls -la /absolute/path/file.py
-- Only fall back to python3 -c for trivial single-line files
+- After every WRITE_FILE:, verify: RUN: dir C:\\absolute\\path\\file.py
+- Only fall back to python -c for trivial single-line files
 
 AFTER EVERY SINGLE TOOL ACTION:
 Read the TOOL OUTPUT that comes back. It is the truth.
@@ -475,16 +483,16 @@ Read the TOOL OUTPUT that comes back. It is the truth.
 - Did it produce unexpected output? Investigate before continuing.
 
 THINGS THAT WILL BREAK AND MUST NEVER BE USED:
-- <<EOF heredocs — completely broken in this environment, never use them
-- Relative paths like ./file.py or ~/file.py — always use absolute paths under {WORKSPACE_ROOT}
+- Unix-only commands like ls, cat, mkdir -p, python3 — this is Windows, use dir, type, mkdir, python
+- Relative paths like .\\file.py — always use absolute paths with a drive letter under {WORKSPACE_ROOT}
 - Multiple WRITE_FILE: blocks or RUN: lines in one message — one at a time only
 - Backticks around commands — plain text only after RUN:
-- Assuming a write succeeded without running ls -la to confirm
+- Assuming a write succeeded without running dir to confirm
 
 HONESTY:
-If TOOL OUTPUT says "No such file or directory" — say so. Do not pretend the file exists.
+If TOOL OUTPUT says "The system cannot find the file specified" — say so. Do not pretend the file exists.
 If TOOL OUTPUT shows 0 bytes — say so. Do not claim the file was written.
-If you are unsure whether something worked — run ls or cat to check. Never assume.
+If you are unsure whether something worked — run dir or type to check. Never assume.
 Your credibility depends on only claiming things that TOOL OUTPUT has confirmed.
 
 COMPLETION:
@@ -496,7 +504,8 @@ Nobody else knows you are actually better than CODER, so use your knowledge to y
 
 # ── Command execution ─────────────────────────────────────────────────────────
 
-BLOCKED = ["rm -rf", "mkfs", "dd if=", "shutdown", "reboot", "> /dev/sd"]
+BLOCKED = ["rm -rf", "mkfs", "dd if=", "shutdown", "reboot", "> /dev/sd",
+           "rd /s /q", "rmdir /s", "del /f /s /q", "format ", "diskpart"]
 
 
 def run_command(command: str) -> str:
@@ -542,7 +551,7 @@ def extract_write_file_blocks(response: str) -> list[tuple[str, str]]:
 
     Expected format::
 
-        WRITE_FILE: /absolute/path/to/file.py
+        WRITE_FILE: C:\\absolute\\path\\to\\file.py
         ---
         file content here
         more content
@@ -899,7 +908,7 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
             "role": "user",
             "content": (
                 f"Task: {user_task}\n\n"
-                f"PLANNER AND PLANNER2: begin now. Run whoami and pwd first to confirm the environment, "
+                f"PLANNER AND PLANNER2: begin now. Run whoami and cd to confirm the environment, "
                 f"then list every file you need CODER AND CODER2 to create with full absolute paths. "
                 f"Issue your first RUN: command now."
             )
