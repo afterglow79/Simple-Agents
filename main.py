@@ -564,6 +564,8 @@ def extract_write_file_blocks(response: str) -> list[tuple[str, str]]:
             if i < len(lines) and lines[i].strip() == "---":
                 i += 1
                 content_lines = []
+                # A content line whose stripped form equals "---" will end the block.
+                # This is intentional: agents must not write bare "---" as a content line.
                 while i < len(lines) and lines[i].strip() != "---":
                     content_lines.append(lines[i])
                     i += 1
@@ -584,7 +586,9 @@ def write_file_to_disk(path: str, content: str) -> str:
     Returns a human-readable result string suitable for TOOL OUTPUT.
     """
     try:
-        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
         size = os.path.getsize(path)
