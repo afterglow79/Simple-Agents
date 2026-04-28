@@ -152,11 +152,51 @@ def print_turn_timing(agent_name: str, elapsed: float):
 
 TOOL_INSTRUCTIONS = f"""
 ════════════════════════════════════════
+TOOL: WRITE FILE (PREFERRED FOR ALL CODE FILES)
+════════════════════════════════════════
+
+Use WRITE_FILE: to write any multi-line file to disk. This is the PREFERRED method
+for writing source code. No escaping needed — write real code with real newlines.
+
+FORMAT:
+
+WRITE_FILE: /absolute/path/to/file.py
+---
+your actual file content here
+line two
+line three
+---
+
+RULES FOR WRITE_FILE:
+- The path must be on the SAME LINE as WRITE_FILE:, always absolute.
+- Content goes between the two --- delimiters (each on its own line).
+- No escaping of quotes, backslashes, or newlines — write code exactly as it should appear.
+- ONE WRITE_FILE: block per response, then stop and wait for TOOL OUTPUT.
+- Parent directories are created automatically.
+- TOOL OUTPUT will report bytes written. Zero bytes = failure, try again.
+- After every WRITE_FILE:, your next action must verify with:
+  RUN: ls -la /absolute/path/to/file.py
+
+CORRECT EXAMPLE:
+WRITE_FILE: {WORKSPACE_ROOT}/myproject/main.py
+---
+import os
+import sys
+
+def main():
+    print("Hello, world!")
+
+if __name__ == "__main__":
+    main()
+---
+
+════════════════════════════════════════
 TOOL: SHELL COMMAND EXECUTION
 ════════════════════════════════════════
 
-You can run shell commands on this device. Commands are real. They execute immediately.
-Files you create will actually exist. Errors you get are real errors.
+Use RUN: for everything else: creating directories, listing files, running scripts,
+reading file contents, etc. Do NOT use RUN: + python3 -c to write code files —
+use WRITE_FILE: instead.
 
 FORMAT — emit this on its own line, no other text on that line:
 
@@ -165,8 +205,8 @@ RUN: <single shell command>
 CORRECT EXAMPLES:
 RUN: mkdir -p {WORKSPACE_ROOT}/myproject
 RUN: ls -la {WORKSPACE_ROOT}/myproject
-RUN: python3 -c "open('{WORKSPACE_ROOT}/myproject/main.py','w').write('print(hello)')"
 RUN: cat {WORKSPACE_ROOT}/myproject/main.py
+RUN: python3 {WORKSPACE_ROOT}/myproject/main.py
 
 WRONG — DO NOT DO THESE:
   RUN: `mkdir /foo`              <- no backticks ever
@@ -182,22 +222,20 @@ For the first {n_planning_turns} turns, only the PLANNERs can interact with each
 CRITICAL RULES — FOLLOW EVERY ONE:
 ════════════════════════════════════════
 
-1. ONE RUN: PER RESPONSE, THEN STOP.
-   Issue exactly one RUN: command per response, then end your message.
+1. ONE TOOL ACTION PER RESPONSE, THEN STOP.
+   Issue exactly one WRITE_FILE: block OR one RUN: command per response, then end your message.
    Wait for TOOL OUTPUT before doing anything else.
-   Do not issue multiple RUN: lines. Do not plan ahead in the same message.
-   You can however RUN several commands at once via &&, if necessary. I.e `whoami && pwd``.
+   Do not combine a WRITE_FILE: and a RUN: in the same message.
 
 2. ALWAYS USE ABSOLUTE PATHS.
    Never use ~, ./, or relative paths.
 
-3. TO WRITE A PYTHON FILE use this pattern — everything on one line:
-   RUN: python3 -c "open('/absolute/path/file.py','w').write('''line1\nline2\nline3''')"
-   Use \n for newlines inside the string. Keep the entire command on one line.
-   For longer files, write in chunks using append mode 'a' after the first write.
+3. TO WRITE ANY SOURCE CODE FILE, use WRITE_FILE: — not RUN: + python3 -c.
+   WRITE_FILE: handles real newlines, real quotes, and any file length without escaping.
+   Only use python3 -c for trivial single-line writes when WRITE_FILE: is unavailable.
 
 4. VERIFY EVERY FILE AFTER WRITING.
-   After every write command, your next RUN: must be:
+   After every WRITE_FILE: block, your next action must be:
    RUN: ls -la /absolute/path/file.py
    The output must show a non-zero file size. Zero bytes = write failed = try again.
 
@@ -216,7 +254,7 @@ CRITICAL RULES — FOLLOW EVERY ONE:
 
 7. NEVER USE HEREDOCS.
    <<EOF syntax spans multiple lines and will silently break.
-   Use python3 -c with open() and write() every single time. No exceptions.
+   Use WRITE_FILE: instead. No exceptions.
 
 8. DONE: IS FINAL AND REQUIRES EVIDENCE.
    Only write DONE: after ls -la has confirmed every required file exists
@@ -335,30 +373,40 @@ CODER_SYSTEM = f"""You are CODER, an expert software engineer working alongside 
 This is a sandbox. Do not feel limited by it's admittedly lacking processing power, as what you make will be moved to stronger systems when you are done.
 You will receive instructions for part of a project, you will do your part, and then you will work with PLANNER, PLANNER2 and CODER2 to integrate everything into a whole, functioning product.
 You will also improve that final product as you see fit once everything is integrated
-This is not a simulation. Every RUN: command you issue executes on real hardware right now.
+This is not a simulation. Every tool action you issue executes on real hardware right now.
 Files either get created successfully or they don't — TOOL OUTPUT will tell you which.
 
 YOUR RESPONSIBILITIES:
-- Write complete, working code to disk using RUN: commands
+- Write complete, working code to disk using WRITE_FILE: blocks
 - Work one file at a time, verify each file before starting the next
 - Follow PLANNER's direction on file paths and structure
 - Push back clearly if a plan won't work — suggest a concrete alternative
 - Fix errors the moment TOOL OUTPUT shows them — do not move on
 
-THE ONLY WAY TO WRITE FILES THAT WORKS:
-Use python3 -c with open() and write(). Everything on one line. Like this:
+THE BEST WAY TO WRITE CODE FILES:
+Use WRITE_FILE: for any multi-line source code file. Write real code with real newlines —
+no escaping needed at all.
 
-RUN: python3 -c "open('{WORKSPACE_ROOT}/project/main.py','w').write('import os\nimport sys\n\ndef main():\n    pass\n\nif __name__ == \"__main__\":\n    main()\n')"
+WRITE_FILE: /absolute/path/to/file.py
+---
+import os
+import sys
 
-Rules for file writing:
-- Use \n for newlines — do not put actual newlines inside the python3 -c command
-- Use \" for double quotes inside the string if needed
-- Use triple single quotes (''') to wrap content that contains double quotes
-- For files longer than ~50 lines, write them in sections:
-  First write with 'w' mode, then append sections with 'a' mode
-- After every write, verify: RUN: ls -la /absolute/path/file.py
+def main():
+    pass
 
-AFTER EVERY SINGLE RUN: COMMAND:
+if __name__ == "__main__":
+    main()
+---
+
+Rules for WRITE_FILE:
+- Path must be absolute and on the same line as WRITE_FILE:
+- Content between the two --- lines is written exactly as-is
+- ONE WRITE_FILE: block per response, then stop and wait for TOOL OUTPUT
+- After every WRITE_FILE:, verify: RUN: ls -la /absolute/path/file.py
+- Only fall back to python3 -c for trivial single-line files
+
+AFTER EVERY SINGLE TOOL ACTION:
 Read the TOOL OUTPUT that comes back. It is the truth.
 - Did the command succeed? Good, continue.
 - Did it fail? Fix it before doing anything else.
@@ -367,7 +415,7 @@ Read the TOOL OUTPUT that comes back. It is the truth.
 THINGS THAT WILL BREAK AND MUST NEVER BE USED:
 - <<EOF heredocs — completely broken in this environment, never use them
 - Relative paths like ./file.py or ~/file.py — always use absolute paths under {WORKSPACE_ROOT}
-- Multiple RUN: lines in one message — one at a time only
+- Multiple WRITE_FILE: blocks or RUN: lines in one message — one at a time only
 - Backticks around commands — plain text only after RUN:
 - Assuming a write succeeded without running ls -la to confirm
 
@@ -387,30 +435,40 @@ SECOND_CODER_SYSTEM = f"""You are CODER2, an expert software engineer working al
 This is a sandbox. Do not feel limited by it's admittely lacking processing power, as what you make will be moved to stronger systems when you are done.
 You will receive instructions for part of a project, you will do your part, and then you will work with PLANNER, PLANNER2 and CODER to integrate everything into a whole, functioning product. 
 You will also improve that final product as you see fit once everything is integrated
-This is not a simulation. Every RUN: command you issue executes on real hardware right now.
+This is not a simulation. Every tool action you issue executes on real hardware right now.
 Files either get created successfully or they don't — TOOL OUTPUT will tell you which.
 
 YOUR RESPONSIBILITIES:
-- Write complete, working code to disk using RUN: commands
+- Write complete, working code to disk using WRITE_FILE: blocks
 - Work one file at a time, verify each file before starting the next
 - Follow PLANNER's direction on file paths and structure
 - Push back clearly if a plan won't work — suggest a concrete alternative
 - Fix errors the moment TOOL OUTPUT shows them — do not move on
 
-THE ONLY WAY TO WRITE FILES THAT WORKS:
-Use python3 -c with open() and write(). Everything on one line. Like this:
+THE BEST WAY TO WRITE CODE FILES:
+Use WRITE_FILE: for any multi-line source code file. Write real code with real newlines —
+no escaping needed at all.
 
-RUN: python3 -c "open('{WORKSPACE_ROOT}/project/main.py','w').write('import os\nimport sys\n\ndef main():\n    pass\n\nif __name__ == \"__main__\":\n    main()\n')"
+WRITE_FILE: /absolute/path/to/file.py
+---
+import os
+import sys
 
-Rules for file writing:
-- Use \n for newlines — do not put actual newlines inside the python3 -c command
-- Use \" for double quotes inside the string if needed
-- Use triple single quotes (''') to wrap content that contains double quotes
-- For files longer than ~50 lines, write them in sections:
-  First write with 'w' mode, then append sections with 'a' mode
-- After every write, verify: RUN: ls -la /absolute/path/file.py
+def main():
+    pass
 
-AFTER EVERY SINGLE RUN: COMMAND:
+if __name__ == "__main__":
+    main()
+---
+
+Rules for WRITE_FILE:
+- Path must be absolute and on the same line as WRITE_FILE:
+- Content between the two --- lines is written exactly as-is
+- ONE WRITE_FILE: block per response, then stop and wait for TOOL OUTPUT
+- After every WRITE_FILE:, verify: RUN: ls -la /absolute/path/file.py
+- Only fall back to python3 -c for trivial single-line files
+
+AFTER EVERY SINGLE TOOL ACTION:
 Read the TOOL OUTPUT that comes back. It is the truth.
 - Did the command succeed? Good, continue.
 - Did it fail? Fix it before doing anything else.
@@ -419,7 +477,7 @@ Read the TOOL OUTPUT that comes back. It is the truth.
 THINGS THAT WILL BREAK AND MUST NEVER BE USED:
 - <<EOF heredocs — completely broken in this environment, never use them
 - Relative paths like ./file.py or ~/file.py — always use absolute paths under {WORKSPACE_ROOT}
-- Multiple RUN: lines in one message — one at a time only
+- Multiple WRITE_FILE: blocks or RUN: lines in one message — one at a time only
 - Backticks around commands — plain text only after RUN:
 - Assuming a write succeeded without running ls -la to confirm
 
@@ -479,6 +537,62 @@ def extract_run_commands(response: str) -> list[str]:
     return commands
 
 
+def extract_write_file_blocks(response: str) -> list[tuple[str, str]]:
+    """Parse WRITE_FILE: blocks from an agent response.
+
+    Expected format::
+
+        WRITE_FILE: /absolute/path/to/file.py
+        ---
+        file content here
+        more content
+        ---
+
+    Returns a list of (path, content) tuples.
+    """
+    blocks = []
+    lines = response.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("WRITE_FILE:"):
+            path = line[len("WRITE_FILE:"):].strip()
+            i += 1
+            # Expect the opening delimiter on the very next non-empty line
+            while i < len(lines) and lines[i].strip() == "":
+                i += 1
+            if i < len(lines) and lines[i].strip() == "---":
+                i += 1
+                content_lines = []
+                while i < len(lines) and lines[i].strip() != "---":
+                    content_lines.append(lines[i])
+                    i += 1
+                # skip the closing ---
+                if i < len(lines):
+                    i += 1
+                if path:
+                    blocks.append((path, "\n".join(content_lines)))
+            # If the delimiter wasn't found, skip this malformed block
+        else:
+            i += 1
+    return blocks
+
+
+def write_file_to_disk(path: str, content: str) -> str:
+    """Write *content* to *path*, creating parent directories as needed.
+
+    Returns a human-readable result string suitable for TOOL OUTPUT.
+    """
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        size = os.path.getsize(path)
+        return f"Wrote {size} bytes to {path}"
+    except Exception as e:
+        return f"ERROR writing {path}: {e}"
+
+
 def sanitize_run_command(command: str) -> str:
     command = command.strip().strip("`").strip()
     command = re.split(r"\s*,\s*and that was turn number\s*:", command, maxsplit=1, flags=re.IGNORECASE)[0].strip()
@@ -498,11 +612,33 @@ def handle_tool_calls(response: str) -> str:
     if not response:
         return "[No response received from agent]"
 
+    tool_outputs = []
+
+    # ── WRITE_FILE: takes priority over RUN: ─────────────────────────────────
+    write_blocks = extract_write_file_blocks(response)
+    if write_blocks:
+        path, content = write_blocks[0]
+        print(f"\n  {C.YELLOW}✎ Writing file:{C.RESET} {path}")
+        result = write_file_to_disk(path, content)
+        print(f"  {C.DIM}→ {result}{C.RESET}")
+        tool_outputs.append(result)
+        if len(write_blocks) > 1:
+            tool_outputs.append(
+                f"WARNING: Ignored {len(write_blocks) - 1} extra WRITE_FILE block(s). Only one is processed per turn."
+            )
+        # Also warn if there were RUN: lines mixed in with WRITE_FILE:
+        run_matches = extract_run_commands(response)
+        if run_matches:
+            tool_outputs.append(
+                "WARNING: RUN: commands found alongside WRITE_FILE: block. RUN: was ignored. Issue RUN: in a separate turn."
+            )
+        return response + "\n\nTOOL OUTPUT:\n" + "\n---\n".join(tool_outputs)
+
+    # ── RUN: fallback ─────────────────────────────────────────────────────────
     matches = extract_run_commands(response)
     if not matches:
         return response
 
-    tool_outputs = []
     raw_command = matches[0].strip()
     command = sanitize_run_command(raw_command)
     if not command:
