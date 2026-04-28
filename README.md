@@ -1,7 +1,7 @@
 # Simple-Agents
 
 A multi-agent AI framework that runs four specialized AI agents in tandem using the [NVIDIA build API](https://build.nvidia.com/). Two planners and two coders collaborate in a shared Linux environment to plan, write, verify, and deliver working software.
-
+## THIS BRANCH IS **LINUX ONLY**
 ---
 
 ## How it works
