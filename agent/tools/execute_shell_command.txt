@@ -3,23 +3,24 @@ TOOL: SHELL COMMAND EXECUTION
 ════════════════════════════════════════
 
 Use RUN: for everything else: creating directories, listing files, running scripts,
-reading file contents, etc. Do NOT use RUN: + python3 -c to write code files —
+reading file contents, etc. Do NOT use RUN: + python -c to write code files —
 use WRITE_FILE: instead.
+
+Please keep RUN commands per turn to a minimum, but feel free to chain things together with &&.
 
 FORMAT — emit this on its own line, no other text on that line:
 
-RUN: <shell command>
+RUN: <single Windows cmd command>
 
 CORRECT EXAMPLES:
-RUN: mkdir -p {WORKSPACE_ROOT}/myproject
-RUN: ls -la {WORKSPACE_ROOT}/myproject
-RUN: cat {WORKSPACE_ROOT}/myproject/main.py
-RUN: python3 {WORKSPACE_ROOT}/myproject/main.py
-RUN: python3 -m py_compile filename.py  <- to check if a python file compiles. You do this after every turn if you are a CODER and writing in Python.
+RUN: mkdir {WORKSPACE_ROOT}\\myproject
+RUN: dir {WORKSPACE_ROOT}\\myproject
+RUN: type {WORKSPACE_ROOT}\\myproject\\main.py
+RUN: python {WORKSPACE_ROOT}\\myproject\\main.py
+RUN: python -m py_compile filename.py  <- to check if a python file compiles. You do this after every turn if you are a CODER and writing in Python.
 
 WRONG — DO NOT DO THESE:
-  RUN: `mkdir /foo`              <- no backticks ever
-  RUN: mkdir /foo && ls /foo    <- only one command at a time
-  RUN: cat > file.py << EOF     <- heredocs DO NOT WORK, never use them
-  RUN: mkdir foo                <- relative paths forbidden, always absolute
-  RUN: ls /tmp</arg_value>      <- never include XML/tool-call tags
+  RUN: `mkdir C:\\foo`              <- no backticks ever
+  RUN: mkdir C:\\foo && dir C:\\foo <- only one command at a time
+  RUN: mkdir foo                   <- relative paths forbidden, always absolute with drive letter
+  RUN: dir C:\\tmp</arg_value>      <- never include XML/tool-call tags
