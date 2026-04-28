@@ -196,6 +196,8 @@ INCORRECT EXAMPLE:
     """
 
 TOOL_INSTRUCTIONS = f"""
+Only respond in English unless the user otherwise prompts it.
+
 ════════════════════════════════════════
 TOOL: WRITE FILE (PREFERRED FOR ALL CODE FILES)
 ════════════════════════════════════════
@@ -265,13 +267,13 @@ WRONG — DO NOT DO THESE:
 ════════════════════════════════════════
 TOOL: READ/WRITE TO PERSISTENT MEMORY
 ════════════════════════════════════════
-Use: "WRITE_TO_MEMORY: content" to save important information to persistent memory across that will be used across runs and to communicate critical bits of information with other agents. You should not use this liberally, but use it to save important information.
-Use: "READ_FROM_MEMORY" to read the entire contents of the persistent memory. This is useful for recalling important information that other agents have written, or that you have written in previous turns. Do not use this to read back large amounts of data that you just wrote — you should already have that information in your current context. Only use READ_FROM_MEMORY when you need to recall something important that was written long ago or by another agent.
+Use: "WRITE_TO_MEMORY: content" to save important information from each turn. Only save the most important parts, and put it in a short summary.
 
 CORRECT EXAMPLES:
-    WRITE_TO_MEMORY: "1+1 is 2"
-    WRITE_TO_MEMORY: "Remember to use absolute paths with drive letters!"
-    READ_FROM_MEMORY
+    WRITE_TO_MEMORY: "[NAME]: ran [XYZ] and got response [ABC]"
+    WRITE_TO_MEMORY: "Discovered [XYZ]"
+    WRITE_TO_MEMORY:
+
 
 INCORRECT EXAMPLES:
     WRITE_TO_MEMORY: "dir C:\\tmp"   <- do not write shell commands to memory
@@ -1147,7 +1149,7 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
 
         print_turn_banner(turn, agent_name, max_turns)
 
-        response = call_agent(model, agent_name, shared_history)
+        response = call_agent(model, agent_name, shared_history, max_tokens=(16384))
         response = handle_tool_calls(response)
 
         print()

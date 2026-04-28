@@ -1,0 +1,37 @@
+════════════════════════════════════════
+TOOL: WRITE FILE (PREFERRED FOR ALL CODE FILES)
+════════════════════════════════════════
+
+Use WRITE_FILE: to write any multi-line file to disk. This is the PREFERRED method
+for writing source code. No escaping needed — write real code with real newlines.
+
+FORMAT:
+
+WRITE_FILE: C:\\absolute\\path\\to\\file.py
+---
+your actual file content here
+line two
+line three
+---
+
+RULES FOR WRITE_FILE:
+- The path must be on the SAME LINE as WRITE_FILE:, always absolute (include the drive letter, e.g. C:\\...).
+- Content goes between the two --- delimiters (each on its own line).
+- No escaping of quotes, backslashes, or newlines — write code exactly as it should appear.
+- You may include multiple WRITE_FILE: blocks and RUN: lines in one response.
+- Parent directories are created automatically.
+- TOOL OUTPUT will report bytes written. Zero bytes = failure, try again.
+- After writing files, verify them with RUN: dir C:\\absolute\\path\\to\\file.py when needed.
+
+CORRECT EXAMPLE:
+WRITE_FILE: {WORKSPACE_ROOT}\\myproject\\main.py
+---
+import os
+import sys
+
+def main():
+    print("Hello, world!")
+
+if __name__ == "__main__":
+    main()
+---

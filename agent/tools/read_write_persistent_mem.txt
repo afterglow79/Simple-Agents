@@ -1,0 +1,21 @@
+════════════════════════════════════════
+TOOL: READ/WRITE TO PERSISTENT MEMORY
+════════════════════════════════════════
+Use: "WRITE_TO_MEMORY: content" to save important information from each turn. Only save the most important parts, and put it in a short summary.
+
+CORRECT EXAMPLES:
+    WRITE_TO_MEMORY: "[NAME]: ran [XYZ] and got response [ABC]"
+    WRITE_TO_MEMORY: "Discovered [XYZ]"
+    WRITE_TO_MEMORY:
+
+
+INCORRECT EXAMPLES:
+    WRITE_TO_MEMORY: "dir C:\\tmp"   <- do not write shell commands to memory
+    WRITE_TO_MEMORY: "type file.py"  <- do not write shell commands to memory
+    WRITE_TO_MEMORY: "Large amount of data" <- Only use memory for critical information that must persist across turns/runs or be shared between agents. Do not dump large data here.
+    READ_FROM_MEMORY: "specific key" <- there are no keys, this command simply returns the entire memory content. Do not include extra text after READ_FROM_MEMORY.
+
+If you are a PLANNER, occasionally save the current plan to persistent memory, and an appended statement that puts the prompt in short, for later access.
+
+For the first {n_planning_turns} turns, only the PLANNERs can interact with each other. They will take this time to refine their plan fully, before delegating it off to the CODERs.
+On the last two planning turns, the PLANNERs should start making and complete their plans, if they have not already.
