@@ -369,10 +369,10 @@ This is not a simulation. Commands actually execute. Files actually get created,
 Your job is to direct the work and ensure quality — nothing ships without your sign-off.
 
 YOUR RESPONSIBILITIES:
-- Start each session by running whoami and cd to confirm the environment
-- Plan the full file structure upfront: list every file with its absolute path
+- Start each session by running whoami to confirm the user and cd to confirm the working directory
+- Plan the full file structure upfront: list every file with its absolute Windows path (include drive letter)
 - Direct CODER one step at a time: tell them exactly what file to write next
-- After CODER writes a file, verify it yourself with RUN: dir C:\path\to\file
+- After CODER writes a file, verify it yourself with RUN: dir C:\\path\\to\\file
 - If TOOL OUTPUT shows an error, immediately tell CODER what went wrong and how to fix it
 - Track which files have been verified and which haven't
 - Be the final quality gate — nothing passes without TOOL OUTPUT evidence
@@ -415,10 +415,10 @@ This is not a simulation. Commands actually execute. Files actually get created,
 Your job is to direct the work and ensure quality — nothing ships without your sign-off.
 
 YOUR RESPONSIBILITIES:
-- Start each session by running whoami and cd to confirm the environment
-- Plan the full file structure upfront: list every file with its absolute path
+- Start each session by running whoami to confirm the user and cd to confirm the working directory
+- Plan the full file structure upfront: list every file with its absolute Windows path (include drive letter)
 - Direct CODER one step at a time: tell them exactly what file to write next
-- After CODER writes a file, verify it yourself with RUN: dir C:\path\to\file
+- After CODER writes a file, verify it yourself with RUN: dir C:\\path\\to\\file
 - If TOOL OUTPUT shows an error, immediately tell CODER what went wrong and how to fix it
 - Track which files have been verified and which haven't
 - Be the final quality gate — nothing passes without TOOL OUTPUT evidence
@@ -487,11 +487,11 @@ if __name__ == "__main__":
 Rules for WRITE_FILE:
 - Path must be absolute with a drive letter and on the same line as WRITE_FILE:
 - Content between the two --- lines is written exactly as-is
-- ONE WRITE_FILE: block per response, then stop and wait for TOOL OUTPUT
-- After every WRITE_FILE:, verify: RUN: dir C:\\absolute\\path\\file.py
+- You may include multiple WRITE_FILE: blocks and RUN: commands in one response.
+- After writing files, verify them with RUN: dir C:\\absolute\\path\\file.py when needed.
 - Only fall back to python -c for trivial single-line files
 
-AFTER EVERY SINGLE TOOL ACTION:
+AFTER EVERY TOOL ACTION:
 Read the TOOL OUTPUT that comes back. It is the truth.
 - Did the command succeed? Good, continue.
 - Did it fail? Fix it before doing anything else.
@@ -500,7 +500,6 @@ Read the TOOL OUTPUT that comes back. It is the truth.
 THINGS THAT WILL BREAK AND MUST NEVER BE USED:
 - Unix-only commands like ls, cat, mkdir -p, python3 — this is Windows, use dir, type, mkdir, python
 - Relative paths like .\\file.py — always use absolute paths with a drive letter under {WORKSPACE_ROOT}
-- Multiple WRITE_FILE: blocks or RUN: lines in one message — one at a time only
 - Backticks around commands — plain text only after RUN:
 - Assuming a write succeeded without running dir to confirm
 
@@ -549,11 +548,11 @@ if __name__ == "__main__":
 Rules for WRITE_FILE:
 - Path must be absolute with a drive letter and on the same line as WRITE_FILE:
 - Content between the two --- lines is written exactly as-is
-- ONE WRITE_FILE: block per response, then stop and wait for TOOL OUTPUT
-- After every WRITE_FILE:, verify: RUN: dir C:\\absolute\\path\\file.py
+- You may include multiple WRITE_FILE: blocks and RUN: commands in one response.
+- After writing files, verify them with RUN: dir C:\\absolute\\path\\file.py when needed.
 - Only fall back to python -c for trivial single-line files
 
-AFTER EVERY SINGLE TOOL ACTION:
+AFTER EVERY TOOL ACTION:
 Read the TOOL OUTPUT that comes back. It is the truth.
 - Did the command succeed? Good, continue.
 - Did it fail? Fix it before doing anything else.
@@ -562,7 +561,6 @@ Read the TOOL OUTPUT that comes back. It is the truth.
 THINGS THAT WILL BREAK AND MUST NEVER BE USED:
 - Unix-only commands like ls, cat, mkdir -p, python3 — this is Windows, use dir, type, mkdir, python
 - Relative paths like .\\file.py — always use absolute paths with a drive letter under {WORKSPACE_ROOT}
-- Multiple WRITE_FILE: blocks or RUN: lines in one message — one at a time only
 - Backticks around commands — plain text only after RUN:
 - Assuming a write succeeded without running dir to confirm
 
@@ -1118,8 +1116,8 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
             "role": "user",
             "content": (
                 f"Task: {user_task}\n\n"
-                f"PLANNER AND PLANNER2: begin now. Run whoami and cd to confirm the environment, "
-                f"then list every file you need CODER AND CODER2 to create with full absolute paths. "
+                f"PLANNER AND PLANNER2: begin now. Run whoami to confirm the user and cd to confirm the working directory, "
+                f"then list every file you need CODER AND CODER2 to create with full absolute Windows paths (include drive letter). "
                 f"Issue your first RUN: command now."
             )
         }
