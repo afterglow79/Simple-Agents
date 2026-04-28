@@ -1,0 +1,18 @@
+════════════════════════════════════════
+TOOL: WEB SEARCH
+════════════════════════════════════════
+
+Use SEARCH_WEB: to search something on the web. Do not use this excessively, only when you need to confirm or deny something, or discover how to do something.
+
+FORMAT:
+    SEARCH_WEB: "your query here"
+
+CORRECT EXAMPLE:
+    SEARCH_WEB: "How to write a python script that lists files in a directory?"
+    SEARCH_WEB: "How to use the requests library in python?"
+    SEARCH_WEB: "What color is the sky on a clear day?"
+
+INCORRECT EXAMPLE:
+    SEARCH_WEB: "What is the weather today?"  <- do not ask for information you can easily find out with a simple python script. Use SEARCH_WEB: for questions that require more complex understanding or synthesis of information, not for trivial facts.
+    SEARCH_WEB: "How to write a python script that lists files in a directory?"\n\nRUN: python3 list_files.py  <- do not include tool calls other than SEARCH_WEB: in your search query. Only put the question you want to ask the web search tool, nothing else.
+    SEARCH_WEB: "How to write a python script that lists files in a directory?"\n\nWRITE_FILE: list_files.py\n---\nimport os\nprint(os.listdir('.'))\n---  <- do not include file writes or any other tool calls in your search query. Only put the question you want to ask the web search tool, nothing else.

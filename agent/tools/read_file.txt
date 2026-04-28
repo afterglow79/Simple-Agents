@@ -1,0 +1,15 @@
+════════════════════════════════════════
+TOOL: READ CONTENTS OF FILE
+════════════════════════════════════════
+
+Use READ_FILE: path if you want to read the contents of a file, for whatever reason. Always use an absolute path. You can read back any file type.
+
+CORRECT EXAMPLES:
+    READ_FILE: /absolute/path/to/file.txt
+    READ_FILE: /some/other/path/to/a/file.txt
+
+INCORRECT EXAMPLES:
+    READ_FILE: ./relative/path/to/file.txt  <- relative paths are not allowed, always absolute
+    READ_FILE: file.txt                     <- relative paths are not allowed, always absolute
+    READ_FILE: /absolute/path/to/directory/ <- you must specify a file, not a directory
+    READ_FILE: something <- do not include extra text, only the command and the absolute file path.
