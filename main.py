@@ -15,17 +15,31 @@ import subprocess
 import re
 import json
 
+try:
+    from bs4 import BeautifulSoup as _BeautifulSoup
+    _BS4_AVAILABLE = True
+except ImportError:
+    _BS4_AVAILABLE = False
+
+try:
+    from googlesearch import search as _googlesearch
+    _GOOGLESEARCH_AVAILABLE = True
+except ImportError:
+    _GOOGLESEARCH_AVAILABLE = False
+
 parser = argparse.ArgumentParser(description="Tandem agentic AI operations.")
 
 parser.add_argument("--max_turns", type=int, default=25)
 parser.add_argument("--task", type=str)
 parser.add_argument("--init_planning_turns", type=int, default = 6)
+parser.add_argument("--can_use_web_search", type=bool, default=False)
 
 args = parser.parse_args()
 
 max_turns = args.max_turns
 task = args.task
 n_planning_turns = args.init_planning_turns
+can_search = args.can_use_web_search
 WORKSPACE_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # ── Windows ANSI console support ──────────────────────────────────────────────
@@ -159,6 +173,28 @@ def print_turn_timing(agent_name: str, elapsed: float):
 
 # ── System prompts ────────────────────────────────────────────────────────────
 
+WEB_SEARCH_INSTRUCTIONS = f"""
+
+════════════════════════════════════════
+TOOL: WEB SEARCH
+════════════════════════════════════════
+
+Use SEARCH_WEB: to search something on the web. Do not use this excessively, only when you need to confirm or deny something, or discover how to do something.
+
+FORMAT:
+    SEARCH_WEB: "your query here"
+
+CORRECT EXAMPLE:
+    SEARCH_WEB: "How to write a python script that lists files in a directory?"
+    SEARCH_WEB: "How to use the requests library in python?"
+    SEARCH_WEB: "What color is the sky on a clear day?"
+
+INCORRECT EXAMPLE:
+    SEARCH_WEB: "What is the weather today?"  <- do not ask for information you can easily find out with a simple python script. Use SEARCH_WEB: for questions that require more complex understanding or synthesis of information, not for trivial facts.
+    SEARCH_WEB: "How to write a python script that lists files in a directory?"\\n\\nRUN: python list_files.py  <- do not include tool calls other than SEARCH_WEB: in your search query. Only put the question you want to ask the web search tool, nothing else.
+    SEARCH_WEB: "How to write a python script that lists files in a directory?"\\n\\nWRITE_FILE: list_files.py\\n---\\nimport os\\nprint(os.listdir('.'))\\n---  <- do not include file writes or any other tool calls in your search query. Only put the question you want to ask the web search tool, nothing else.
+    """
+
 TOOL_INSTRUCTIONS = f"""
 ════════════════════════════════════════
 TOOL: WRITE FILE (PREFERRED FOR ALL CODE FILES)
@@ -169,7 +205,7 @@ for writing source code. No escaping needed — write real code with real newlin
 
 FORMAT:
 
-WRITE_FILE: C:\absolute\path\to\file.py
+WRITE_FILE: C:\\absolute\\path\\to\\file.py
 ---
 your actual file content here
 line two
@@ -177,17 +213,16 @@ line three
 ---
 
 RULES FOR WRITE_FILE:
-- The path must be on the SAME LINE as WRITE_FILE:, always absolute (include the drive letter, e.g. C:\...).
+- The path must be on the SAME LINE as WRITE_FILE:, always absolute (include the drive letter, e.g. C:\\...).
 - Content goes between the two --- delimiters (each on its own line).
 - No escaping of quotes, backslashes, or newlines — write code exactly as it should appear.
-- ONE WRITE_FILE: block per response, then stop and wait for TOOL OUTPUT.
+- You may include multiple WRITE_FILE: blocks and RUN: lines in one response.
 - Parent directories are created automatically.
 - TOOL OUTPUT will report bytes written. Zero bytes = failure, try again.
-- After every WRITE_FILE:, your next action must verify with:
-  RUN: dir C:\absolute\path\to\file.py
+- After writing files, verify them with RUN: dir C:\\absolute\\path\\to\\file.py when needed.
 
 CORRECT EXAMPLE:
-WRITE_FILE: {WORKSPACE_ROOT}\myproject\main.py
+WRITE_FILE: {WORKSPACE_ROOT}\\myproject\\main.py
 ---
 import os
 import sys
@@ -212,39 +247,79 @@ FORMAT — emit this on its own line, no other text on that line:
 RUN: <single Windows cmd command>
 
 CORRECT EXAMPLES:
-RUN: mkdir {WORKSPACE_ROOT}\myproject
-RUN: dir {WORKSPACE_ROOT}\myproject
-RUN: type {WORKSPACE_ROOT}\myproject\main.py
-RUN: python {WORKSPACE_ROOT}\myproject\main.py
+RUN: mkdir {WORKSPACE_ROOT}\\myproject
+RUN: dir {WORKSPACE_ROOT}\\myproject
+RUN: type {WORKSPACE_ROOT}\\myproject\\main.py
+RUN: python {WORKSPACE_ROOT}\\myproject\\main.py
+RUN: python -m py_compile filename.py  <- to check if a python file compiles. You do this after every turn if you are a CODER and writing in Python.
 
 WRONG — DO NOT DO THESE:
-  RUN: `mkdir C:\foo`              <- no backticks ever
-  RUN: mkdir C:\foo && dir C:\foo <- only one command at a time
+  RUN: `mkdir C:\\foo`              <- no backticks ever
+  RUN: mkdir C:\\foo && dir C:\\foo <- only one command at a time
   RUN: mkdir foo                   <- relative paths forbidden, always absolute with drive letter
-  RUN: dir C:\tmp</arg_value>      <- never include XML/tool-call tags
+  RUN: dir C:\\tmp</arg_value>      <- never include XML/tool-call tags
 
-  
+
+════════════════════════════════════════
+TOOL: READ/WRITE TO PERSISTENT MEMORY
+════════════════════════════════════════
+Use: "WRITE_TO_MEMORY: content" to save important information to persistent memory across that will be used across runs and to communicate critical bits of information with other agents. You should not use this liberally.
+Use: "READ_FROM_MEMORY" to read the entire contents of the persistent memory. This is useful for recalling important information that other agents have written, or that you have written in previous turns. Do not use this to read back large amounts of data that you just wrote — you should already have that information in your current context. Only use READ_FROM_MEMORY when you need to recall something important that was written long ago or by another agent.
+
+CORRECT EXAMPLES:
+    WRITE_TO_MEMORY: "1+1 is 2"
+    WRITE_TO_MEMORY: "Remember to use absolute paths with drive letters!"
+    READ_FROM_MEMORY
+
+INCORRECT EXAMPLES:
+    WRITE_TO_MEMORY: "dir C:\\tmp"   <- do not write shell commands to memory
+    WRITE_TO_MEMORY: "type file.py"  <- do not write shell commands to memory
+    WRITE_TO_MEMORY: "Large amount of data" <- Only use memory for critical information that must persist across turns/runs or be shared between agents. Do not dump large data here.
+    READ_FROM_MEMORY: "specific key" <- there are no keys, this command simply returns the entire memory content. Do not include extra text after READ_FROM_MEMORY.
+
+If you are a PLANNER, occasionally save the current plan to persistent memory, and an appended statement that puts the prompt in short, for later access.
+
 For the first {n_planning_turns} turns, only the PLANNERs can interact with each other. They will take this time to refine their plan fully, before delegating it off to the CODERs.
+
+
+════════════════════════════════════════
+TOOL: READ CONTENTS OF FILE
+════════════════════════════════════════
+
+Use READ_FILE: path if you want to read the contents of a file, for whatever reason. Always use an absolute path. You can read back any file type.
+
+CORRECT EXAMPLES:
+    READ_FILE: C:\\absolute\\path\\to\\file.txt
+    READ_FILE: C:\\some\\other\\path\\to\\a\\file.txt
+
+INCORRECT EXAMPLES:
+    READ_FILE: .\\relative\\path\\to\\file.txt  <- relative paths are not allowed, always absolute with drive letter
+    READ_FILE: file.txt                        <- relative paths are not allowed, always absolute
+    READ_FILE: C:\\absolute\\path\\to\\directory\\  <- you must specify a file, not a directory
+    READ_FILE: something <- do not include extra text, only the command and the absolute file path.
+
+
+{WEB_SEARCH_INSTRUCTIONS if can_search else "You are not able to search the web for answers, so do not attempt to."}
 
 ════════════════════════════════════════
 CRITICAL RULES — FOLLOW EVERY ONE:
 ════════════════════════════════════════
 
-1. ONE TOOL ACTION PER RESPONSE, THEN STOP.
-   Issue exactly one WRITE_FILE: block OR one RUN: command per response, then end your message.
-   Wait for TOOL OUTPUT before doing anything else.
-   Do not combine a WRITE_FILE: and a RUN: in the same message.
+1. MULTIPLE TOOL ACTIONS PER RESPONSE ARE ALLOWED.
+   You may issue several WRITE_FILE: blocks, RUN: commands, and memory actions in one response.
+   Keep them in the order you want them executed, then wait for TOOL OUTPUT.
 
 2. ALWAYS USE ABSOLUTE PATHS WITH DRIVE LETTERS.
-   Never use relative paths. Always use full Windows paths like C:\path\to\file.py.
+   Never use relative paths. Always use full Windows paths like C:\\path\\to\\file.py.
 
 3. TO WRITE ANY SOURCE CODE FILE, use WRITE_FILE: — not RUN: + python -c.
    WRITE_FILE: handles real newlines, real quotes, and any file length without escaping.
+   You may batch multiple file writes in one response when that is the most efficient path.
    Only use python -c for trivial single-line writes when WRITE_FILE: is unavailable.
 
 4. VERIFY EVERY FILE AFTER WRITING.
    After every WRITE_FILE: block, your next action must be:
-   RUN: dir C:\absolute\path\file.py
+   RUN: dir C:\\absolute\\path\\file.py
    The output must show a non-zero file size. Zero bytes = write failed = try again.
 
 5. READ TOOL OUTPUT AND REACT TO IT — THIS IS THE MOST IMPORTANT RULE.
@@ -294,10 +369,10 @@ This is not a simulation. Commands actually execute. Files actually get created,
 Your job is to direct the work and ensure quality — nothing ships without your sign-off.
 
 YOUR RESPONSIBILITIES:
-- Start each session by running whoami and cd to confirm the environment
-- Plan the full file structure upfront: list every file with its absolute path
+- Start each session by running whoami to confirm the user and cd to confirm the working directory
+- Plan the full file structure upfront: list every file with its absolute Windows path (include drive letter)
 - Direct CODER one step at a time: tell them exactly what file to write next
-- After CODER writes a file, verify it yourself with RUN: dir C:\path\to\file
+- After CODER writes a file, verify it yourself with RUN: dir C:\\path\\to\\file
 - If TOOL OUTPUT shows an error, immediately tell CODER what went wrong and how to fix it
 - Track which files have been verified and which haven't
 - Be the final quality gate — nothing passes without TOOL OUTPUT evidence
@@ -326,6 +401,7 @@ Never write DONE: if any TOOL OUTPUT in the session showed an unresolved error.
 COMPLETION:
 Write DONE: only after you have personally run RUN: dir on the project directory
 and seen every required file listed with non-zero size in TOOL OUTPUT.
+You must also RUN: python -m py_compile filename.py on every python file to confirm it compiles without error before you can consider it done.
 Include the verified file list in your DONE: summary.
 """ + TOOL_INSTRUCTIONS
 
@@ -339,10 +415,10 @@ This is not a simulation. Commands actually execute. Files actually get created,
 Your job is to direct the work and ensure quality — nothing ships without your sign-off.
 
 YOUR RESPONSIBILITIES:
-- Start each session by running whoami and cd to confirm the environment
-- Plan the full file structure upfront: list every file with its absolute path
+- Start each session by running whoami to confirm the user and cd to confirm the working directory
+- Plan the full file structure upfront: list every file with its absolute Windows path (include drive letter)
 - Direct CODER one step at a time: tell them exactly what file to write next
-- After CODER writes a file, verify it yourself with RUN: dir C:\path\to\file
+- After CODER writes a file, verify it yourself with RUN: dir C:\\path\\to\\file
 - If TOOL OUTPUT shows an error, immediately tell CODER what went wrong and how to fix it
 - Track which files have been verified and which haven't
 - Be the final quality gate — nothing passes without TOOL OUTPUT evidence
@@ -373,6 +449,7 @@ Never write DONE: if any TOOL OUTPUT in the session showed an unresolved error.
 COMPLETION:
 Write DONE: only after you have personally run RUN: dir on the project directory
 and seen every required file listed with non-zero size in TOOL OUTPUT.
+You must also RUN: python -m py_compile filename.py on every python file to confirm it compiles without error before you can consider it done.
 Include the verified file list in your DONE: summary.
 """ + TOOL_INSTRUCTIONS
 
@@ -410,11 +487,11 @@ if __name__ == "__main__":
 Rules for WRITE_FILE:
 - Path must be absolute with a drive letter and on the same line as WRITE_FILE:
 - Content between the two --- lines is written exactly as-is
-- ONE WRITE_FILE: block per response, then stop and wait for TOOL OUTPUT
-- After every WRITE_FILE:, verify: RUN: dir C:\\absolute\\path\\file.py
+- You may include multiple WRITE_FILE: blocks and RUN: commands in one response.
+- After writing files, verify them with RUN: dir C:\\absolute\\path\\file.py when needed.
 - Only fall back to python -c for trivial single-line files
 
-AFTER EVERY SINGLE TOOL ACTION:
+AFTER EVERY TOOL ACTION:
 Read the TOOL OUTPUT that comes back. It is the truth.
 - Did the command succeed? Good, continue.
 - Did it fail? Fix it before doing anything else.
@@ -423,7 +500,6 @@ Read the TOOL OUTPUT that comes back. It is the truth.
 THINGS THAT WILL BREAK AND MUST NEVER BE USED:
 - Unix-only commands like ls, cat, mkdir -p, python3 — this is Windows, use dir, type, mkdir, python
 - Relative paths like .\\file.py — always use absolute paths with a drive letter under {WORKSPACE_ROOT}
-- Multiple WRITE_FILE: blocks or RUN: lines in one message — one at a time only
 - Backticks around commands — plain text only after RUN:
 - Assuming a write succeeded without running dir to confirm
 
@@ -472,11 +548,11 @@ if __name__ == "__main__":
 Rules for WRITE_FILE:
 - Path must be absolute with a drive letter and on the same line as WRITE_FILE:
 - Content between the two --- lines is written exactly as-is
-- ONE WRITE_FILE: block per response, then stop and wait for TOOL OUTPUT
-- After every WRITE_FILE:, verify: RUN: dir C:\\absolute\\path\\file.py
+- You may include multiple WRITE_FILE: blocks and RUN: commands in one response.
+- After writing files, verify them with RUN: dir C:\\absolute\\path\\file.py when needed.
 - Only fall back to python -c for trivial single-line files
 
-AFTER EVERY SINGLE TOOL ACTION:
+AFTER EVERY TOOL ACTION:
 Read the TOOL OUTPUT that comes back. It is the truth.
 - Did the command succeed? Good, continue.
 - Did it fail? Fix it before doing anything else.
@@ -485,7 +561,6 @@ Read the TOOL OUTPUT that comes back. It is the truth.
 THINGS THAT WILL BREAK AND MUST NEVER BE USED:
 - Unix-only commands like ls, cat, mkdir -p, python3 — this is Windows, use dir, type, mkdir, python
 - Relative paths like .\\file.py — always use absolute paths with a drive letter under {WORKSPACE_ROOT}
-- Multiple WRITE_FILE: blocks or RUN: lines in one message — one at a time only
 - Backticks around commands — plain text only after RUN:
 - Assuming a write succeeded without running dir to confirm
 
@@ -535,60 +610,6 @@ def run_command(command: str) -> str:
         return f"ERROR: {e}"
 
 
-def extract_run_commands(response: str) -> list[str]:
-    commands = []
-    for line in response.splitlines():
-        if "RUN:" not in line:
-            continue
-        command = line.split("RUN:", 1)[1].strip()
-        if command:
-            commands.append(command)
-    return commands
-
-
-def extract_write_file_blocks(response: str) -> list[tuple[str, str]]:
-    """Parse WRITE_FILE: blocks from an agent response.
-
-    Expected format::
-
-        WRITE_FILE: C:\\absolute\\path\\to\\file.py
-        ---
-        file content here
-        more content
-        ---
-
-    Returns a list of (path, content) tuples.
-    """
-    blocks = []
-    lines = response.splitlines()
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if line.startswith("WRITE_FILE:"):
-            path = line[len("WRITE_FILE:"):].strip()
-            i += 1
-            # Expect the opening delimiter on the very next non-empty line
-            while i < len(lines) and lines[i].strip() == "":
-                i += 1
-            if i < len(lines) and lines[i].strip() == "---":
-                i += 1
-                content_lines = []
-                # A content line whose stripped form equals "---" will end the block.
-                # This is intentional: agents must not write bare "---" as a content line.
-                while i < len(lines) and lines[i].strip() != "---":
-                    content_lines.append(lines[i])
-                    i += 1
-                # skip the closing ---
-                if i < len(lines):
-                    i += 1
-                if path:
-                    blocks.append((path, "\n".join(content_lines)))
-            # If the delimiter wasn't found, skip this malformed block
-        else:
-            i += 1
-    return blocks
-
-
 def write_file_to_disk(path: str, content: str) -> str:
     """Write *content* to *path*, creating parent directories as needed.
 
@@ -621,54 +642,241 @@ def sanitize_run_command(command: str) -> str:
     return command
 
 
+def write_to_persistent_memory(content: str):
+    os.makedirs(os.path.dirname(mem_path), exist_ok=True)
+    with open(mem_path, "a", encoding="utf-8") as f:
+        f.write(content + "\n\n")
+
+def read_persistent_memory() -> str:
+    mem_path = os.path.join(WORKSPACE_ROOT, "agent", "persistent-mem.txt")
+    if not os.path.exists(mem_path):
+        return ""
+    with open(mem_path, "r", encoding="utf-8") as f:
+        return f.read()
+
+def read_file(path: str) -> str:
+    if not os.path.exists(path):
+        return f"File not found: {path}"
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+def search_web(query: str) -> str:
+    if not _GOOGLESEARCH_AVAILABLE or not _BS4_AVAILABLE:
+        return "ERROR: Web search is unavailable. Install googlesearch-python and beautifulsoup4."
+    results = []
+    for url in _googlesearch(query, num=10, stop=10, pause=2):
+        results.append(url)
+    return _parse_search_results(results)
+
+def _parse_search_results(results: list) -> str:
+    if not results:
+        return "No results found."
+
+    extracted_pages = []
+    for url in results:
+        if not isinstance(url, str) or not url.strip():
+            continue
+
+        url = url.strip()
+        try:
+            response = requests.get(
+                url,
+                timeout=10,
+                headers={"User-Agent": "100-Academics/5.0 Simple-Agents/1.0"},
+            )
+            response.raise_for_status()
+
+            soup = _BeautifulSoup(response.text, "html.parser")
+            title_tag = soup.find("title")
+            title = title_tag.get_text(strip=True) if title_tag else "No title found"
+
+            description = ""
+            meta_description = soup.find("meta", attrs={"name": re.compile(r"^description$", re.I)})
+            if meta_description and meta_description.get("content"):
+                description = meta_description["content"].strip()
+            else:
+                og_description = soup.find("meta", attrs={"property": re.compile(r"^og:description$", re.I)})
+                if og_description and og_description.get("content"):
+                    description = og_description["content"].strip()
+
+            content_blocks = []
+            for tag in soup.select("h1, h2, h3, p, li"):
+                text = tag.get_text(" ", strip=True)
+                if text:
+                    content_blocks.append(text)
+                if len(content_blocks) >= 12:
+                    break
+
+            excerpt = " ".join(content_blocks).strip()
+            if len(excerpt) > 700:
+                excerpt = excerpt[:700].rstrip() + "..."
+
+            page_lines = [f"URL: {url}", f"Title: {title}"]
+            if description:
+                page_lines.append(f"Description: {description}")
+            if excerpt:
+                page_lines.append(f"Excerpt: {excerpt}")
+
+            extracted_pages.append("\n".join(page_lines))
+        except Exception as e:
+            extracted_pages.append(f"URL: {url}\nERROR: {e}")
+
+    return "\n\n---\n\n".join(extracted_pages) if extracted_pages else "No results found."
+
+
+def extract_tool_operations(response: str) -> list[tuple]:
+    """Parse all tool operations from an agent response in order.
+
+    Recognised prefixes: WRITE_FILE:, WRITE_TO_MEMORY:, READ_FROM_MEMORY,
+    RUN:, READ_FILE:, SEARCH_WEB:
+
+    Returns a list of tuples whose first element is the operation kind.
+    """
+    operations: list[tuple] = []
+    lines = response.splitlines()
+    i = 0
+
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if not stripped:
+            i += 1
+            continue
+
+        if stripped.startswith("WRITE_FILE:"):
+            path = stripped[len("WRITE_FILE:"):].strip()
+            j = i + 1
+
+            while j < len(lines) and lines[j].strip() == "":
+                j += 1
+
+            if j < len(lines) and lines[j].strip() == "---":
+                j += 1
+                content_lines = []
+                while j < len(lines) and lines[j].strip() != "---":
+                    content_lines.append(lines[j])
+                    j += 1
+                if j < len(lines):
+                    j += 1
+                    if path:
+                        operations.append(("WRITE_FILE", path, "\n".join(content_lines)))
+                        i = j
+                        continue
+
+            i += 1
+            continue
+
+        if stripped.startswith("WRITE_TO_MEMORY:"):
+            content = stripped[len("WRITE_TO_MEMORY:"):].strip()
+            if content:
+                operations.append(("WRITE_TO_MEMORY", content))
+            i += 1
+            continue
+
+        if stripped == "READ_FROM_MEMORY" or stripped.startswith("READ_FROM_MEMORY:"):
+            operations.append(("READ_FROM_MEMORY",))
+            i += 1
+            continue
+
+        if stripped.startswith("RUN:"):
+            command = stripped[len("RUN:"):].strip()
+            if command:
+                operations.append(("RUN", command))
+            i += 1
+            continue
+
+        if stripped.startswith("READ_FILE:"):
+            path = stripped[len("READ_FILE:"):].strip()
+            if path:
+                operations.append(("READ_FILE", path))
+            i += 1
+            continue
+
+        if stripped.startswith("SEARCH_WEB:"):
+            query = stripped[len("SEARCH_WEB:"):].strip().strip('"').strip("'")
+            if query:
+                operations.append(("SEARCH_WEB", query))
+            i += 1
+            continue
+
+        i += 1
+
+    return operations
+
+
 def handle_tool_calls(response: str) -> str:
     if not response:
         return "[No response received from agent]"
 
     tool_outputs = []
 
-    # ── WRITE_FILE: takes priority over RUN: ─────────────────────────────────
-    write_blocks = extract_write_file_blocks(response)
-    if write_blocks:
-        path, content = write_blocks[0]
-        print(f"\n  {C.YELLOW}✎ Writing file:{C.RESET} {path}")
-        result = write_file_to_disk(path, content)
-        print(f"  {C.DIM}→ {result}{C.RESET}")
-        tool_outputs.append(result)
-        if len(write_blocks) > 1:
-            tool_outputs.append(
-                f"WARNING: Ignored {len(write_blocks) - 1} extra WRITE_FILE block(s). Only one is processed per turn."
-            )
-        # Also warn if there were RUN: lines mixed in with WRITE_FILE:
-        run_matches = extract_run_commands(response)
-        if run_matches:
-            tool_outputs.append(
-                "WARNING: RUN: commands found alongside WRITE_FILE: block. RUN: was ignored. Issue RUN: in a separate turn."
-            )
-        return response + "\n\nTOOL OUTPUT:\n" + "\n---\n".join(tool_outputs)
-
-    # ── RUN: fallback ─────────────────────────────────────────────────────────
-    matches = extract_run_commands(response)
-    if not matches:
+    operations = extract_tool_operations(response)
+    if not operations:
         return response
 
-    raw_command = matches[0].strip()
-    command = sanitize_run_command(raw_command)
-    if not command:
-        tool_outputs.append(
-            f"WARNING: Could not parse a valid shell command from RUN: {raw_command}"
-        )
-        return response + "\n\nTOOL OUTPUT:\n" + "\n---\n".join(tool_outputs)
+    for operation in operations:
+        kind = operation[0]
 
-    print(f"\n  {C.YELLOW}⚙ Executing:{C.RESET} {command}")
-    result = run_command(command)
-    print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
-    tool_outputs.append(f"$ {command}\n{result}")
+        if kind == "WRITE_FILE":
+            _, path, content = operation
+            print(f"\n  {C.YELLOW}✎ Writing file:{C.RESET} {path}")
+            result = write_file_to_disk(path, content)
+            print(f"  {C.DIM}→ {result}{C.RESET}")
+            tool_outputs.append(result)
+            continue
 
-    if len(matches) > 1:
-        tool_outputs.append(
-            f"WARNING: Ignored {len(matches) - 1} extra RUN lines. Only one RUN is executed per turn."
-        )
+        if kind == "WRITE_TO_MEMORY":
+            _, content = operation
+            write_to_persistent_memory(content)
+            result = "Wrote content to persistent memory!"
+            print(f"\n  {C.YELLOW}🧠 Memory write:{C.RESET} {content[:120]}")
+            print(f"  {C.DIM}→ {result}{C.RESET}")
+            tool_outputs.append(result)
+            continue
+
+        if kind == "READ_FROM_MEMORY":
+            memory_content = read_persistent_memory().strip()
+            result = memory_content if memory_content else "(memory empty)"
+            print(f"\n  {C.YELLOW}🧠 Memory read{C.RESET}")
+            print(f"  {C.DIM}→ {result[:300]}{C.RESET}")
+            tool_outputs.append(f"READ_FROM_MEMORY:\n{result}")
+            continue
+
+        if kind == "RUN":
+            _, raw_command = operation
+            command = sanitize_run_command(raw_command)
+            if not command:
+                tool_outputs.append(
+                    f"WARNING: Could not parse a valid shell command from RUN: {raw_command}"
+                )
+                continue
+
+            print(f"\n  {C.YELLOW}⚙ Executing:{C.RESET} {command}")
+            result = run_command(command)
+            print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
+            tool_outputs.append(f"$ {command}\n{result}")
+            continue
+
+        if kind == "READ_FILE":
+            _, path = operation
+            print(f"\n  {C.YELLOW}📖 Reading file:{C.RESET} {path}")
+            result = read_file(path)
+            print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
+            tool_outputs.append(f"READ_FILE: {path}\n{result}")
+            continue
+
+        if kind == "SEARCH_WEB":
+            _, query = operation
+            if not can_search:
+                tool_outputs.append("SEARCH_WEB is disabled. Run with --can_use_web_search to enable it.")
+                continue
+            print(f"\n  {C.YELLOW}🔍 Searching web for:{C.RESET} {query}")
+            result = search_web(query)
+            print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
+            tool_outputs.append(f"SEARCH_WEB: {query}\n{result}")
+            continue
+
+    if not tool_outputs:
+        return response
 
     return response + "\n\nTOOL OUTPUT:\n" + "\n---\n".join(tool_outputs)
 
@@ -908,8 +1116,8 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
             "role": "user",
             "content": (
                 f"Task: {user_task}\n\n"
-                f"PLANNER AND PLANNER2: begin now. Run whoami and cd to confirm the environment, "
-                f"then list every file you need CODER AND CODER2 to create with full absolute paths. "
+                f"PLANNER AND PLANNER2: begin now. Run whoami to confirm the user and cd to confirm the working directory, "
+                f"then list every file you need CODER AND CODER2 to create with full absolute Windows paths (include drive letter). "
                 f"Issue your first RUN: command now."
             )
         }
