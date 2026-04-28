@@ -650,7 +650,7 @@ def sanitize_run_command(command: str) -> str:
 
 
 def write_to_persistent_memory(content: str):
-    os.makedirs(os.path.dirname(mem_path), exist_ok=True)
+    mem_path = os.path.join(WORKSPACE_ROOT, "agent", "persistent-mem.txt")
     with open(mem_path, "a", encoding="utf-8") as f:
         f.write(content + "\n\n")
 
