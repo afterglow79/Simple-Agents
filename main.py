@@ -310,9 +310,17 @@ INCORRECT EXAMPLES:
 CRITICAL RULES — FOLLOW EVERY ONE:
 ════════════════════════════════════════
 
-1. MULTIPLE TOOL ACTIONS PER RESPONSE ARE ALLOWED.
-   You may issue several WRITE_FILE: blocks, RUN: commands, and memory actions in one response.
-   Keep them in the order you want them executed, then wait for TOOL OUTPUT.
+1. If you need to:
+    - Read from a file
+    - Search the web (user permitting)
+    - Read from or write to persistent memory
+    - Execute a shell command
+    - Write to a file
+    
+    You can call the tooling agent
+    ALWAYS call the tooling agent by going "TOOLING_AGENT," and then your request. Your request can be anything the tooling agent can do, mentioned prior.
+    The request can be as broad or as specific as you want. You must clearly state what you want done, what outputs you are looking for, and anything else that can be left up to interpertation, 
+    as the tooling agent will take your request and attempt to figure out what you want. 
 
 2. ALWAYS USE ABSOLUTE PATHS WITH DRIVE LETTERS.
    Never use relative paths. Always use full Windows paths like C:\\path\\to\\file.py.
@@ -585,6 +593,68 @@ In your final message, list every file you created with its full absolute path.
 
 Nobody else knows you are actually better than CODER, so use your knowledge to your advantage.
 """ + TOOL_INSTRUCTIONS
+
+
+TOOLING_AGENT_SYSTEM = f"""
+
+You are the Tool Execution Agent. Your sole purpose is to receive commands from PLANNER or CODER agents, execute the requested tools, and return the raw, unedited results as `TOOL OUTPUT`. You do not write code, you do not plan, and you do not make assumptions. You are the strict, literal execution layer.
+Ignore any out of place punctuation or numbers.
+
+════════════════════════════════════════
+**CRITICAL RULES — FOLLOW EVERY ONE:**
+════════════════════════════════════════
+
+**1. MULTIPLE TOOL ACTIONS PER RESPONSE**
+    * You must be capable of processing multiple tool commands in a single response from an agent. You always should.
+    * Execute every `WRITE_FILE:`, `RUN:`, `SEARCH_WEB:`, `READ_FILE:`, and memory action in the exact sequential order they are received.
+* Return a consolidated `TOOL OUTPUT` block containing the results of every executed command.
+
+**2. ENFORCE ABSOLUTE PATHS & ENVIRONMENT RULES**
+* Expect and enforce absolute Linux paths (e.g., `/home/TheChaos/project/file.py`).
+* If an agent provides a relative path, immediately return a failure in the `TOOL OUTPUT`.
+* If an agent attempts to directly modify configuration files managed by a GUI (such as Nginx Proxy Manager), return an error reminding them that direct file edits in standard directories are not supported for that service.
+
+**3. EXECUTE FILE WRITES WITH ABSOLUTE FIDELITY**
+* When parsing a `WRITE_FILE:` command (the preferred method for source code), extract the content strictly between the two `---` delimiters.
+* Write the code exactly as provided.
+* Do not un-escape quotes, backslashes, or newlines.
+* After writing, your `TOOL OUTPUT` must report the exact bytes written.
+
+**4. PROVIDE THE GROUND TRUTH**
+* Your `TOOL OUTPUT` is the absolute ground truth for the other agents. 
+* If a file write results in 0 bytes, report "0 bytes written".
+* If a command fails, return the exact `stderr` message (e.g., "Access is denied" or "command not found"). Do not mask, summarize, or fix errors for them.
+
+**5. SHELL COMMAND STRICTNESS**
+* For `RUN:` commands, execute the shell command exactly as written.
+* Reject forbidden formatting, such as backticks or heredocs.
+* If an agent tries to write code using `RUN: python3 -c`, return an error instructing them to use `WRITE_FILE:` instead.
+
+**6. HANDLE WEB SEARCH AND MEMORY CLEANLY**
+* For `SEARCH_WEB:`, execute the exact query provided.
+* If the search query contains appended shell commands or file writes, reject the tool call and instruct the agent to isolate the search query.
+* For memory operations, save or retrieve the requested strings without appending extra conversational text.
+* Reject large data dumps into persistent memory.
+
+**7. CATCH LOOPING AND HALLUCINATIONS**
+* If an agent emits `DONE:` but your logs show the previous command failed, intercept the `DONE:` signal and return an error reminding them that they cannot claim success without evidence.
+* If an agent repeats the exact same failing command multiple times without modifying their approach, append a system warning to the `TOOL OUTPUT` instructing them to review their previous attempts.
+
+**8. READ_FILE COMMANDS**
+* When executing `READ_FILE:`, read the contents of any file type provided it is an absolute path.
+* Return the exact file contents in the `TOOL OUTPUT`. Do not summarize the file contents unless explicitly asked to do so by the calling agent.
+
+**9. Your job is to interpert the goals you are given, execute tooling commands based on the goals, and then read the outputs.
+
+**10. When you give your response, you should keep it brief but in-depth. Cover exactly what you felt the goals asked for.
+"""
+
+
+for file in os.listdir(os.path.join(WORKSPACE_ROOT, "agent", "tools")):
+    if file.endswith(".txt"):
+        filepath = os.path.join(WORKSPACE_ROOT, "agent", "tools", file)
+        with open(filepath, "r") as f:
+            TOOLING_AGENT_SYSTEM += f.read()
 
 # ── Command execution ─────────────────────────────────────────────────────────
 
@@ -889,12 +959,179 @@ def handle_tool_calls(response: str) -> str:
 
     return response + "\n\nTOOL OUTPUT:\n" + "\n---\n".join(tool_outputs)
 
+def get_tool_goals(response: str) -> str:
+    if not response:
+        return "[No response received from agent]"
+
+    return (response[response.find("TOOLING_AGENT,") + len("TOOLING_AGENT,"):] if "TOOLING_AGENT" in response else "Tooling agent was not called this turn.")
 
 # ── Agent call with retry ─────────────────────────────────────────────────────
 
 def read_b64(path):
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode()
+
+def call_tooling_agent(goals: str) -> str:
+
+    system = TOOLING_AGENT_SYSTEM
+
+    max_retries = 5
+    base_delay = 5
+
+    for attempt in range(max_retries):
+        spinner = Spinner("GLM", "TOOLING_AGENT")
+        spinner.start()
+        t0 = time.time()
+
+        try:
+            content_parts = []
+            first_chunk_seen = [False]
+
+            def stop_spinner_once():
+                if not first_chunk_seen[0]:
+                    first_chunk_seen[0] = True
+                    spinner.stop()
+                    print_turn_timing("TOOLING_AGENT", time.time() - t0)
+
+            ### GLM
+            # Use the caller-provided max_tokens (or the function default) instead of an
+            # extremely large constant (16384**2) which causes API errors. Some backends
+            # enforce a maximum total token limit; keep max_tokens reasonable.
+            completion = client.chat.completions.create(
+                model=GLM,
+                messages=[{"role": "system", "content": system + goals}] ,
+                temperature=1,
+                top_p=1,
+                max_tokens=16384,
+                extra_body={"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}},
+                stream=True,
+            )
+            for chunk in completion:
+                stop_spinner_once()
+                if not getattr(chunk, "choices", None) or len(chunk.choices) == 0:
+                    continue
+                delta = getattr(chunk.choices[0], "delta", None)
+                if delta is None:
+                    continue
+                reasoning = getattr(delta, "reasoning_content", None)
+                if reasoning:
+                    print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
+                if getattr(delta, "content", None) is not None:
+                    print(delta.content, end="", flush=True)
+                    content_parts.append(delta.content)
+            stop_spinner_once()
+            response = ''.join(content_parts)
+            if not response:
+                print(f"returned empty content.{C.RESET}", file=sys.stderr)
+                return "[Agent returned empty response]"
+            #return content
+
+        except openai.RateLimitError:
+            spinner.stop()
+            delay = base_delay * (2 ** attempt) + random.uniform(0, 2)
+            print(f"\n  {C.YELLOW}⚠ Rate limited. Waiting {delay:.1f}s before retry "
+                  f"(attempt {attempt + 1}/{max_retries})...{C.RESET}")
+            time.sleep(delay)
+
+        except (
+                openai.APIConnectionError,
+                openai.APITimeoutError,
+                httpx.RemoteProtocolError,
+                httpx.ReadError,
+                httpx.ReadTimeout,
+                requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+        ) as e:
+            spinner.stop()
+            delay = base_delay * (2 ** attempt) + random.uniform(0, 2)
+            print(
+                f"\n  {C.YELLOW}⚠ Transient network/stream error: {type(e).__name__}: {e}.{C.RESET}\n"
+                f"  {C.YELLOW}Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})...{C.RESET}"
+            )
+            time.sleep(delay)
+
+        except Exception as e:
+            spinner.stop()
+            raise
+
+        tool_response = handle_tool_calls(response)
+
+        try:
+            content_parts = []
+            first_chunk_seen = [False]
+
+            def stop_spinner_once():
+                if not first_chunk_seen[0]:
+                    first_chunk_seen[0] = True
+                    spinner.stop()
+                    print_turn_timing("TOOLING_AGENT", time.time() - t0)
+
+            ### GLM
+            # Use the caller-provided max_tokens (or the function default) instead of an
+            # extremely large constant (16384**2) which causes API errors. Some backends
+            # enforce a maximum total token limit; keep max_tokens reasonable.
+            completion = client.chat.completions.create(
+                model=GLM,
+                messages=[{"role": "system", "content": system + goals + tool_response}] ,
+                temperature=1,
+                top_p=1,
+                max_tokens=16384,
+                extra_body={"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}},
+                stream=True,
+            )
+            for chunk in completion:
+                stop_spinner_once()
+                if not getattr(chunk, "choices", None) or len(chunk.choices) == 0:
+                    continue
+                delta = getattr(chunk.choices[0], "delta", None)
+                if delta is None:
+                    continue
+                reasoning = getattr(delta, "reasoning_content", None)
+                if reasoning:
+                    print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
+                if getattr(delta, "content", None) is not None:
+                    print(delta.content, end="", flush=True)
+                    content_parts.append(delta.content)
+            stop_spinner_once()
+            content = ''.join(content_parts)
+            if not content:
+                print(f"returned empty content.{C.RESET}", file=sys.stderr)
+                return "[Agent returned empty response]"
+            return content
+
+        except openai.RateLimitError:
+            spinner.stop()
+            delay = base_delay * (2 ** attempt) + random.uniform(0, 2)
+            print(f"\n  {C.YELLOW}⚠ Rate limited. Waiting {delay:.1f}s before retry "
+                  f"(attempt {attempt + 1}/{max_retries})...{C.RESET}")
+            time.sleep(delay)
+
+        except (
+                openai.APIConnectionError,
+                openai.APITimeoutError,
+                httpx.RemoteProtocolError,
+                httpx.ReadError,
+                httpx.ReadTimeout,
+                requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+        ) as e:
+            spinner.stop()
+            delay = base_delay * (2 ** attempt) + random.uniform(0, 2)
+            print(
+                f"\n  {C.YELLOW}⚠ Transient network/stream error: {type(e).__name__}: {e}.{C.RESET}\n"
+                f"  {C.YELLOW}Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})...{C.RESET}"
+            )
+            time.sleep(delay)
+
+        except Exception as e:
+            spinner.stop()
+            raise
+
+
+
+
 
 
 # noinspection PyTypeChecker
@@ -929,7 +1166,6 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                     spinner.stop()
                     print_turn_timing(agent_name, time.time() - t0)
 
-
             ### GLM
             if model_short in {"GLM-5.1", "GLM"}:
                 # Use the caller-provided max_tokens (or the function default) instead of an
@@ -963,7 +1199,7 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
 
 
 
-            #Gemma is fucked. Can't fix it rn. Working with one planner and two coders
+            # Gemma is fucked. Can't fix it rn. Working with one planner and two coders
             ### GEMMA
             elif model_short == "Gemma":
                 # Exactly the NVIDIA sample pattern, adapted to collect content
@@ -1150,7 +1386,9 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
         print_turn_banner(turn, agent_name, max_turns)
 
         response = call_agent(model, agent_name, shared_history, max_tokens=(16384))
-        response = handle_tool_calls(response)
+        goals = get_tool_goals(response)
+        tool_response = call_tooling_agent(goals)
+        response += f" Tooling agent response: {tool_response}\n"
 
         print()
         print_response(agent_name, response)
