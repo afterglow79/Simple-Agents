@@ -163,135 +163,8 @@ def print_turn_timing(agent_name: str, elapsed: float):
 
 # ── System prompts ────────────────────────────────────────────────────────────
 
-WEB_SEARCH_INSTRUCTIONS = f"""
-
-════════════════════════════════════════
-TOOL: WEB SEARCH
-════════════════════════════════════════
-
-Use SEARCH_WEB: to search something on the web. Do not use this excessively, only when you need to confirm or deny something, or discover how to do something.
-
-FORMAT:
-    SEARCH_WEB: "your query here"
-
-CORRECT EXAMPLE:
-    SEARCH_WEB: "How to write a python script that lists files in a directory?"
-    SEARCH_WEB: "How to use the requests library in python?"
-    SEARCH_WEB: "What color is the sky on a clear day?"
-
-INCORRECT EXAMPLE:
-    SEARCH_WEB: "What is the weather today?"  <- do not ask for information you can easily find out with a simple python script. Use SEARCH_WEB: for questions that require more complex understanding or synthesis of information, not for trivial facts.
-    SEARCH_WEB: "How to write a python script that lists files in a directory?"\n\nRUN: python3 list_files.py  <- do not include tool calls other than SEARCH_WEB: in your search query. Only put the question you want to ask the web search tool, nothing else.
-    SEARCH_WEB: "How to write a python script that lists files in a directory?"\n\nWRITE_FILE: list_files.py\n---\nimport os\nprint(os.listdir('.'))\n---  <- do not include file writes or any other tool calls in your search query. Only put the question you want to ask the web search tool, nothing else.
-    """
 TOOL_INSTRUCTIONS = f"""
 Only respond in English unless the user otherwise prompts it.
-
-════════════════════════════════════════
-TOOL: WRITE FILE (PREFERRED FOR ALL CODE FILES)
-════════════════════════════════════════
-
-Use WRITE_FILE: to write any multi-line file to disk. This is the PREFERRED method
-for writing source code. No escaping needed — write real code with real newlines.
-
-FORMAT:
-
-WRITE_FILE: /absolute/path/to/file.py
----
-your actual file content here
-line two
-line three
----
-
-RULES FOR WRITE_FILE:
-- The path must be on the SAME LINE as WRITE_FILE:, always absolute.
-- Content goes between the two --- delimiters (each on its own line).
-- No escaping of quotes, backslashes, or newlines — write code exactly as it should appear.
-- You may include multiple WRITE_FILE: blocks and RUN: lines in one response; they will be executed in order.
-- Parent directories are created automatically.
-- TOOL OUTPUT will report bytes written. Zero bytes = failure, try again.
-- After writing files, verify them with RUN: ls -la /absolute/path/to/file.py when needed.
-
-CORRECT EXAMPLE:
-WRITE_FILE: {WORKSPACE_ROOT}/myproject/main.py
----
-import os
-import sys
-
-def main():
-    print("Hello, world!")
-
-if __name__ == "__main__":
-    main()
----
-
-════════════════════════════════════════
-TOOL: SHELL COMMAND EXECUTION
-════════════════════════════════════════
-
-Use RUN: for everything else: creating directories, listing files, running scripts,
-reading file contents, etc. Do NOT use RUN: + python3 -c to write code files —
-use WRITE_FILE: instead.
-
-FORMAT — emit this on its own line, no other text on that line:
-
-RUN: <shell command>
-
-CORRECT EXAMPLES:
-  RUN: mkdir -p {WORKSPACE_ROOT}/myproject
-  RUN: ls -la {WORKSPACE_ROOT}/myproject
-  RUN: cat {WORKSPACE_ROOT}/myproject/main.py
-  RUN: python3 {WORKSPACE_ROOT}/myproject/main.py
-  RUN: python3 -m py_compile filename.py <- to check if a python file compiles. You do this after every turn if you are a CODER and writing in Python.
-
-WRONG — DO NOT DO THESE:
-  RUN: `mkdir /foo`              <- no backticks ever
-  RUN: mkdir /foo && ls /foo    <- only one command at a time
-  RUN: cat > file.py << EOF     <- heredocs DO NOT WORK, never use them
-  RUN: mkdir foo                <- relative paths forbidden, always absolute
-  RUN: ls /tmp</arg_value>      <- never include XML/tool-call tags
-
-
-════════════════════════════════════════
-TOOL: READ/WRITE TO PERSISTENT MEMORY
-════════════════════════════════════════
-Use: "WRITE_TO_MEMORY: content" to save important information from each turn. Only save the most important parts, and put it in a short summary.
-
-CORRECT EXAMPLES:
-    WRITE_TO_MEMORY: "[NAME]: ran [XYZ] and got response [ABC]"
-    WRITE_TO_MEMORY: "Discovered [XYZ]"
-    WRITE_TO_MEMORY:
-
-INCORRECT EXAMPLES:
-    WRITE_TO_MEMORY: "ls -la /tmp"   <- do not write shell commands to memory,
-    WRITE_TO_MEMORY: "cat file.py"    <- do not write shell commands to memory
-    WRITE_TO_MEMORY: "Large amount of data" <- Only use memory for critical information that must persist across turns/runs or be shared between agents. Do not dump large data here.
-    READ_FROM_MEMORY: "specific key" <- there are no keys, this command simply returns the entire memory content. Do not include extra text after READ_FROM_MEMORY.
-
-If you are a PLANNER, occasionally save the current plan to persistent memory, and an appended statement that puts the prompt in short, for later access.
-
-For the first {n_planning_turns} turns, only the PLANNERs can interact with each other. They will take this time to refine their plan fully, before delegating it off to the CODERs.
-On the last two planning turns, the PLANNERs should start making and complete their plans, if they have not already.
-
-
-════════════════════════════════════════
-TOOL: READ CONTENTS OF FILE
-════════════════════════════════════════
-
-Use READ_FILE: path if you want to read the contents of a file, for whatever reason. Always use an absolute path. You can read back any file type.
-
-CORRECT EXAMPLES:
-    READ_FILE: /absolute/path/to/file.txt
-    READ_FILE: /some/other/path/to/a/file.txt
-
-INCORRECT EXAMPLES:
-    READ_FILE: ./relative/path/to/file.txt  <- relative paths are not allowed, always absolute
-    READ_FILE: file.txt                   <- relative paths are not allowed, always absolute
-    READ_FILE: /absolute/path/to/directory/  <- you must specify a file, not a directory
-    READ_FILE: something <- do not include extra text, only the command and the absolute file path.
-
-
-{WEB_SEARCH_INSTRUCTIONS if can_search else "You are not able to search the web for answers, so do not attempt to."}
 
 ════════════════════════════════════════
 CRITICAL RULES — FOLLOW EVERY ONE:
@@ -701,6 +574,19 @@ def read_file(path: str) -> str:
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
 
+def get_specs() -> str:
+    result = ""
+
+    result = subprocess.run(
+        "inxi -F",
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=60
+    )
+
+    return result
+
 def search_web(query: str) -> str:
     if not _GOOGLESEARCH_AVAILABLE or not _BS4_AVAILABLE:
         return "ERROR: Web search is unavailable. Install googlesearch-python and beautifulsoup4."
@@ -864,6 +750,11 @@ def extract_tool_operations(response: str) -> list[tuple]:
             i += 1
             continue
 
+        if stripped.startswith("GET_SPECS:"):
+            operations.append(("GET_SPECS"))
+            i += 1
+            continue
+
         i += 1
 
     return operations
@@ -941,6 +832,11 @@ def handle_tool_calls(response: str) -> str:
             tool_outputs.append(f"SEARCH_WEB: {query}\n{result}")
             continue
 
+        if kind == "GET_SPECS":
+            specs = get_specs()
+            tool_outputs.append(specs)
+            print(f"\n {C.YELLOW} Device specs are: {specs}")
+
     if not tool_outputs:
         return response
 
@@ -958,6 +854,7 @@ def get_tool_goals(response: str) -> str:
     return response[idx + len("TOOLING_AGENT,"):]
 
 
+# noinspection PyTypeChecker
 def call_tooling_agent(goals: str) -> str:
     system = TOOLING_AGENT_SYSTEM
 
