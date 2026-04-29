@@ -1,6 +1,5 @@
 .env
-.venv
-alpaca_trader/
+.venv/
 prompt.txt
-yieldforge/
 agent/persistent-mem.txt
+log.txt

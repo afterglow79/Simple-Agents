@@ -32,6 +32,7 @@ parser.add_argument("--max_turns", type=int, default=25)
 parser.add_argument("--task", type=str)
 parser.add_argument("--init_planning_turns", type=int, default = 6)
 parser.add_argument("--can_use_web_search", type=bool, default=False)
+parser.add_argument("--log", type=bool, default=False)
 
 args = parser.parse_args()
 
@@ -39,6 +40,8 @@ max_turns = args.max_turns
 task = args.task
 n_planning_turns = args.init_planning_turns
 can_search = args.can_use_web_search
+log = args.log
+
 WORKSPACE_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 if task and os.path.exists(task):  ## allow user to pass through files for longer or more complex tasks.
@@ -179,7 +182,8 @@ CRITICAL RULES — FOLLOW EVERY ONE:
     - Discover system specifications
 
     You can call the tooling agent
-    ALWAYS call the tooling agent by going "TOOLING_AGENT," and then your request. Your request can be anything the tooling agent can do, mentioned prior.
+    ALWAYS call the tooling agent by going "TOOLING_AGENT," and then your request. 
+    Your request can be anything the tooling agent can do, mentioned prior.
     The request can be as broad or as specific as you want. You must clearly state what you want done, what outputs you are looking for, and anything else that can be left up to interpretation,
     as the tooling agent will take your request and attempt to figure out what you want.
     NEVER, EVER, do RUN: commands by yourself. always pass them to the tooling agent.
@@ -276,6 +280,10 @@ You must also RUN: python3 -m py_compile filename.py on every python file to con
 Include the verified file list in your DONE: summary.
 """ + TOOL_INSTRUCTIONS
 
+
+##### unused rn
+
+
 # SECOND_PLANNER_SYSTEM = """You are PLANNER2, a senior software architect working alongside CODER
 # (an expert programmer) and PLANNER, another senior software architect (although less experienced and intelligent), and CODER2 (another expert programmer), in a real Linux environment on a unknown system.
 # This is a sandbox. You must discover the specs of the system your on and tailor the prompt to those specs.
@@ -363,6 +371,9 @@ Your credibility depends on only claiming things that TOOL OUTPUT has confirmed.
 Only agree to DONE: when PLANNER  has verified all files.
 In your final message, list every file you created with its full absolute path.
 """ + TOOL_INSTRUCTIONS
+
+
+##### unused rn
 
 # SECOND_CODER_SYSTEM = f"""You are CODER2, an expert software engineer working alongside PLANNER
 # (a software architect), PLANNER2 (A more intelligent software architect), and CODER (another good coder). in a real Linux environment on unknown system.
@@ -482,6 +493,9 @@ Ignore any out of place punctuation or numbers.
 
 **10. RESPONSE STYLE**
 * When you give your response, you should keep it brief but in-depth. Cover exactly what you felt the goals asked for.
+
+**11. SUMMARIZE TOOL OUTPUTS.
+* If you recieve only this prompt and tooling outputs, you are to list or summarize the tooling outputs.
 """
 
 _tools_dir = os.path.join(WORKSPACE_ROOT, "agent", "tools")
@@ -922,7 +936,7 @@ def call_tooling_agent(goals: str) -> str:
 
             completion = client.chat.completions.create(
                 model=GLM,
-                messages=[{"role": "system", "content": system + goals + tool_response}],
+                messages=[{"role": "system", "content": system + tool_response}],
                 temperature=1,
                 top_p=1,
                 max_tokens=16384,
@@ -1256,25 +1270,30 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
     session_start = time.time()
 
     for turn in range(1, max_turns + 1):
-
+        
         if turn <= n_planning_turns:  ## planner is to coordinate during initial planning phase
             agent_name, model = agents[(turn - 1) % 1]
         else:  ## after planning phase, all agents work together
             agent_name, model = agents[(turn - 1) % 2]
 
         print_turn_banner(turn, agent_name, max_turns)
-
+        begin = time.time()
         response = call_agent(model, agent_name, shared_history, max_tokens=16384)
         goals = get_tool_goals(response)
         if "TOOLING_AGENT," in response:
             tool_response = call_tooling_agent(goals)
             response += f" Tooling agent response: {tool_response}\n"
-
+        end = time.time()
         print()
         print_response(agent_name, response)
         shared_history.append((agent_name, response))
 
         last_output = response
+        
+        if(log):
+            with open("log.txt", "a", encoding="utf-8") as log_file:
+                log_file.write(f"TURN {turn} - {agent_name}, Duration: {end - begin:.2f}s\n")
+                log_file.write(response + "\n\n")
 
         if "DONE:" in response:
             print_done(agent_name, time.time() - session_start, turn)
