@@ -1,0 +1,14 @@
+════════════════════════════════════════
+TOOL: GET SPECS
+════════════════════════════════════════
+
+Use "GET_SPECS:" if you want to understand the environment you are on. This will return all useful information about the device you are on.
+
+CORRECT EXAMPLES:
+    GET_SPECS:  <- there should be nothing after the colon
+
+INCORRECT EXAMPLES:
+    GET_SPECS: words <- no words after the colon
+    GET_SPECS: test <- no words after the colon
+    GET_SPECS: asfsgd <- no words after the colon
+    GET_SPECS: blablabla <- no words after the colon
