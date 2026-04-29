@@ -21,6 +21,5 @@ RUN: python -m py_compile filename.py  <- to check if a python file compiles. Yo
 
 WRONG — DO NOT DO THESE:
   RUN: `mkdir C:\\foo`              <- no backticks ever
-  RUN: mkdir C:\\foo && dir C:\\foo <- only one command at a time
   RUN: mkdir foo                   <- relative paths forbidden, always absolute with drive letter
   RUN: dir C:\\tmp</arg_value>      <- never include XML/tool-call tags

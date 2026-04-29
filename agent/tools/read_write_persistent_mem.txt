@@ -17,5 +17,4 @@ INCORRECT EXAMPLES:
 
 If you are a PLANNER, occasionally save the current plan to persistent memory, and an appended statement that puts the prompt in short, for later access.
 
-For the first {n_planning_turns} turns, only the PLANNERs can interact with each other. They will take this time to refine their plan fully, before delegating it off to the CODERs.
 On the last two planning turns, the PLANNERs should start making and complete their plans, if they have not already.

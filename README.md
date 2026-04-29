@@ -10,19 +10,19 @@ A multi-agent AI framework that runs four specialized AI agents in tandem using 
 
 Agents operate in two phases:
 
-1. **Planning phase** — PLANNER and PLANNER2 collaborate for the first N turns (default: 6) to produce a complete plan: file structure (with full Windows paths), responsibilities, and integration strategy.
+1. **Planning phase** — PLANNER and PLANNER2 collaborate for the first N turns (default: 6) to refine a full plan: file structure (with full Windows paths), responsibilities, and integration strategy.
 2. **Coding phase** — CODER and CODER2 receive the plan, each implements their assigned portion, then all four agents integrate the pieces into a finished product.
 
-Every agent shares the same real tool set (write files, run `cmd.exe` commands, read/write shared memory, and optionally search the web). Agents see each other's responses and tool output, so they coordinate naturally through the conversation.
+Every agent has access to the same set of real tools (write files, run `cmd.exe` commands, read/write shared memory, and optionally search the web). Agents can see each other's responses and tool output, so they coordinate naturally through the conversation.
 
 ### Agents
 
-| Role     | Model                                   | Color   | Responsibility                                   |
-|----------|-----------------------------------------|---------|--------------------------------------------------|
-| PLANNER  | `google/gemma-4-31b-it`                 | Cyan    | Initial architecture and task breakdown          |
-| PLANNER2 | `z-ai/glm-5.1`                          | Cyan    | Refines the plan; splits work between the coders |
-| CODER    | `qwen/qwen3-coder-480b-a35b-instruct`   | Magenta | Implements first half of the project             |
-| CODER2   | `deepseek-ai/deepseek-v4-flash`         | Magenta | Implements second half of the project            |
+| Role     | Model                                   | Color   | Responsibility                                      |
+|----------|-----------------------------------------|---------|-----------------------------------------------------|
+| PLANNER  | `google/gemma-4-31b-it`                 | Cyan    | Initial architecture and task breakdown             |
+| PLANNER2 | `z-ai/glm-5.1`                          | Cyan    | Refines the plan; splits work between the coders    |
+| CODER    | `qwen/qwen3-coder-480b-a35b-instruct`   | Magenta | Implements first half of the project                |
+| CODER2   | `deepseek-ai/deepseek-v4-flash`         | Magenta | Implements second half of the project               |
 
 ### Agent tools
 
@@ -31,11 +31,12 @@ Each agent can use the following tools in any turn:
 | Tool               | Description                                                                    |
 |--------------------|--------------------------------------------------------------------------------|
 | `WRITE_FILE:`      | Write a multi-line file to an absolute Windows path on disk                    |
-| `RUN:`             | Execute a single `cmd.exe` command (60 s timeout)                              |
+| `RUN:`             | Execute a `cmd.exe` command (60 s timeout)                                     |
 | `READ_FILE:`       | Read the contents of any file by absolute Windows path                         |
 | `WRITE_TO_MEMORY:` | Append a note to the shared persistent memory file                             |
 | `READ_FROM_MEMORY` | Read the entire shared persistent memory                                       |
 | `SEARCH_WEB:`      | Google search *(only when `--can_use_web_search` is set)*                      |
+| `GET_SPECS:`       | Retrieve device and OS specifications via `systeminfo`                         |
 
 Dangerous commands (`rd /s /q C:\`, `format`, `shutdown`, `del /f /s /q`) are blocked.
 

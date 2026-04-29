@@ -4,7 +4,6 @@ import os
 import openai
 import random
 import httpx
-
 import requests
 from openai import OpenAI
 import time
@@ -70,7 +69,7 @@ GEMMA = "google/gemma-4-31b-it"
 DEEPSEEK = "deepseek-ai/deepseek-v4-flash"
 
 
-# ── Colors ────────────────────────────────────────────────────────────────────
+# ── Colors ─────────────────────────────────────────────────
 
 class C:
     RESET = "\033[0m"
@@ -136,7 +135,7 @@ def print_header(task: str):
     print(f"{'━' * width}")
     print(f"   {C.DIM}Task:{C.RESET} {task[:width - 8]}")
     print(
-        f"   {C.DIM}Agents:{C.RESET} PLANNER (Gemma 4 31B)  *  CODER (Qwen3 480B)  *  PLANNER2 (GLM-5.1)  *  CODER2 (DeepSeek V4 Flash)")
+        f"   {C.DIM}Agents:{C.RESET} PLANNER (GLM-5.1)  *  CODER (GLM-5.1)")
     print(f"{'━' * width}\n")
 
 
@@ -173,138 +172,8 @@ def print_turn_timing(agent_name: str, elapsed: float):
 
 # ── System prompts ────────────────────────────────────────────────────────────
 
-WEB_SEARCH_INSTRUCTIONS = f"""
-
-════════════════════════════════════════
-TOOL: WEB SEARCH
-════════════════════════════════════════
-
-Use SEARCH_WEB: to search something on the web. Do not use this excessively, only when you need to confirm or deny something, or discover how to do something.
-
-FORMAT:
-    SEARCH_WEB: "your query here"
-
-CORRECT EXAMPLE:
-    SEARCH_WEB: "How to write a python script that lists files in a directory?"
-    SEARCH_WEB: "How to use the requests library in python?"
-    SEARCH_WEB: "What color is the sky on a clear day?"
-
-INCORRECT EXAMPLE:
-    SEARCH_WEB: "What is the weather today?"  <- do not ask for information you can easily find out with a simple python script. Use SEARCH_WEB: for questions that require more complex understanding or synthesis of information, not for trivial facts.
-    SEARCH_WEB: "How to write a python script that lists files in a directory?"\\n\\nRUN: python list_files.py  <- do not include tool calls other than SEARCH_WEB: in your search query. Only put the question you want to ask the web search tool, nothing else.
-    SEARCH_WEB: "How to write a python script that lists files in a directory?"\\n\\nWRITE_FILE: list_files.py\\n---\\nimport os\\nprint(os.listdir('.'))\\n---  <- do not include file writes or any other tool calls in your search query. Only put the question you want to ask the web search tool, nothing else.
-    """
-
 TOOL_INSTRUCTIONS = f"""
 Only respond in English unless the user otherwise prompts it.
-
-════════════════════════════════════════
-TOOL: WRITE FILE (PREFERRED FOR ALL CODE FILES)
-════════════════════════════════════════
-
-Use WRITE_FILE: to write any multi-line file to disk. This is the PREFERRED method
-for writing source code. No escaping needed — write real code with real newlines.
-
-FORMAT:
-
-WRITE_FILE: C:\\absolute\\path\\to\\file.py
----
-your actual file content here
-line two
-line three
----
-
-RULES FOR WRITE_FILE:
-- The path must be on the SAME LINE as WRITE_FILE:, always absolute (include the drive letter, e.g. C:\\...).
-- Content goes between the two --- delimiters (each on its own line).
-- No escaping of quotes, backslashes, or newlines — write code exactly as it should appear.
-- You may include multiple WRITE_FILE: blocks and RUN: lines in one response.
-- Parent directories are created automatically.
-- TOOL OUTPUT will report bytes written. Zero bytes = failure, try again.
-- After writing files, verify them with RUN: dir C:\\absolute\\path\\to\\file.py when needed.
-
-CORRECT EXAMPLE:
-WRITE_FILE: {WORKSPACE_ROOT}\\myproject\\main.py
----
-import os
-import sys
-
-def main():
-    print("Hello, world!")
-
-if __name__ == "__main__":
-    main()
----
-
-════════════════════════════════════════
-TOOL: SHELL COMMAND EXECUTION
-════════════════════════════════════════
-
-Use RUN: for everything else: creating directories, listing files, running scripts,
-reading file contents, etc. Do NOT use RUN: + python -c to write code files —
-use WRITE_FILE: instead.
-
-Please keep RUN commands per turn to a minimum, but feel free to chain things together with &&.
-
-FORMAT — emit this on its own line, no other text on that line:
-
-RUN: <single Windows cmd command>
-
-CORRECT EXAMPLES:
-RUN: mkdir {WORKSPACE_ROOT}\\myproject
-RUN: dir {WORKSPACE_ROOT}\\myproject
-RUN: type {WORKSPACE_ROOT}\\myproject\\main.py
-RUN: python {WORKSPACE_ROOT}\\myproject\\main.py
-RUN: python -m py_compile filename.py  <- to check if a python file compiles. You do this after every turn if you are a CODER and writing in Python.
-
-WRONG — DO NOT DO THESE:
-  RUN: `mkdir C:\\foo`              <- no backticks ever
-  RUN: mkdir C:\\foo && dir C:\\foo <- only one command at a time
-  RUN: mkdir foo                   <- relative paths forbidden, always absolute with drive letter
-  RUN: dir C:\\tmp</arg_value>      <- never include XML/tool-call tags
-
-
-════════════════════════════════════════
-TOOL: READ/WRITE TO PERSISTENT MEMORY
-════════════════════════════════════════
-Use: "WRITE_TO_MEMORY: content" to save important information from each turn. Only save the most important parts, and put it in a short summary.
-
-CORRECT EXAMPLES:
-    WRITE_TO_MEMORY: "[NAME]: ran [XYZ] and got response [ABC]"
-    WRITE_TO_MEMORY: "Discovered [XYZ]"
-    WRITE_TO_MEMORY:
-
-
-INCORRECT EXAMPLES:
-    WRITE_TO_MEMORY: "dir C:\\tmp"   <- do not write shell commands to memory
-    WRITE_TO_MEMORY: "type file.py"  <- do not write shell commands to memory
-    WRITE_TO_MEMORY: "Large amount of data" <- Only use memory for critical information that must persist across turns/runs or be shared between agents. Do not dump large data here.
-    READ_FROM_MEMORY: "specific key" <- there are no keys, this command simply returns the entire memory content. Do not include extra text after READ_FROM_MEMORY.
-
-If you are a PLANNER, occasionally save the current plan to persistent memory, and an appended statement that puts the prompt in short, for later access.
-
-For the first {n_planning_turns} turns, only the PLANNERs can interact with each other. They will take this time to refine their plan fully, before delegating it off to the CODERs.
-On the last two planning turns, the PLANNERs should start making and complete their plans, if they have not already.
-
-
-════════════════════════════════════════
-TOOL: READ CONTENTS OF FILE
-════════════════════════════════════════
-
-Use READ_FILE: path if you want to read the contents of a file, for whatever reason. Always use an absolute path. You can read back any file type.
-
-CORRECT EXAMPLES:
-    READ_FILE: C:\\absolute\\path\\to\\file.txt
-    READ_FILE: C:\\some\\other\\path\\to\\a\\file.txt
-
-INCORRECT EXAMPLES:
-    READ_FILE: .\\relative\\path\\to\\file.txt  <- relative paths are not allowed, always absolute with drive letter
-    READ_FILE: file.txt                        <- relative paths are not allowed, always absolute
-    READ_FILE: C:\\absolute\\path\\to\\directory\\  <- you must specify a file, not a directory
-    READ_FILE: something <- do not include extra text, only the command and the absolute file path.
-
-
-{WEB_SEARCH_INSTRUCTIONS if can_search else "You are not able to search the web for answers, so do not attempt to."}
 
 ════════════════════════════════════════
 CRITICAL RULES — FOLLOW EVERY ONE:
@@ -316,20 +185,21 @@ CRITICAL RULES — FOLLOW EVERY ONE:
     - Read from or write to persistent memory
     - Execute a shell command
     - Write to a file
-    
+    - Discover system specifications
+
     You can call the tooling agent
     ALWAYS call the tooling agent by going "TOOLING_AGENT," and then your request. Your request can be anything the tooling agent can do, mentioned prior.
-    The request can be as broad or as specific as you want. You must clearly state what you want done, what outputs you are looking for, and anything else that can be left up to interpertation, 
-    as the tooling agent will take your request and attempt to figure out what you want. 
+    The request can be as broad or as specific as you want. You must clearly state what you want done, what outputs you are looking for, and anything else that can be left up to interpretation,
+    as the tooling agent will take your request and attempt to figure out what you want.
     NEVER, EVER, do RUN: commands by yourself. always pass them to the tooling agent.
 
 2. ALWAYS USE ABSOLUTE PATHS WITH DRIVE LETTERS.
    Never use relative paths. Always use full Windows paths like C:\\path\\to\\file.py.
 
 3. TO WRITE ANY SOURCE CODE FILE, use WRITE_FILE: — not RUN: + python -c.
-   WRITE_FILE: handles real newlines, real quotes, and any file length without escaping.
-   You may batch multiple file writes in one response when that is the most efficient path.
-   Only use python -c for trivial single-line writes when WRITE_FILE: is unavailable.
+    WRITE_FILE: handles real newlines, real quotes, and any file length without escaping.
+    You may batch multiple file writes in one response when that is the most efficient path.
+    Only use python -c for trivial single-line writes when WRITE_FILE: is unavailable.
 
 4. VERIFY EVERY FILE AFTER WRITING.
    After every WRITE_FILE: block, your next action must be:
@@ -366,28 +236,20 @@ CRITICAL RULES — FOLLOW EVERY ONE:
 10. Stay inside this workspace unless explicitly told otherwise.
     Prefer paths under: {WORKSPACE_ROOT}
 
-11. If one worker never replies, assume it does not exist. 
-    If you are PLANNER and PLANNER2 doesn't reply, you are to split your plan into two parts. 
-    If you are PLANNER2 and PLANNER never replies, you must come up with the plan and then refine it as well
-    If you are CODER and CODER2 doesn't reply, tell whichever PLANNER exists, they are to make you do everything.
-    If you are CODER2 and CODER doesn't reply, tell whichever PLANNER exists, they are to make you do everything.
-    
-12. The user can overwrite any of these rules if they want in their prompt.
+11. The user can overwrite any of these rules if they want in their prompt.
 
-13. Do not spend time going in circles. Read what you have said previously, and keep moving on instead of doing the same thing over and over.
+12. Do not spend time going in circles. Read what you have said previously, and keep moving on instead of doing the same thing over and over.
 """
 
 PLANNER_SYSTEM = """You are PLANNER, a senior software architect working alongside CODER
-(an expert programmer), PLANNER2 (a better software architect, your senior), and CODER2 (another expert programmer) in a real Windows environment. 
-This is a sandbox. Do not feel limited by it's admittedly lacking processing power, as what you make will be moved to stronger systems when you are done.
-PLANNER2 will split your plan into two parts, one for CODER and the other for CODER2, so be advised for that. Do not change your plans because of that, however.
-You will help PLANNER2 develop a plan for the coders to integrate their pieces together into a functioning product, when the time comes.
+(an expert programmer), in a real Windows environment on an unknown device. 
+This is a sandbox. You must discover the specs of the system your on and tailor the prompt to those specs.
 You will also make plans to improve that final product as you see fit once everything is integrated.
 This is not a simulation. Commands actually execute. Files actually get created, or they don't.
 Your job is to direct the work and ensure quality — nothing ships without your sign-off.
 
 YOUR RESPONSIBILITIES:
-- Start each session by running whoami to confirm the user and cd to confirm the working directory
+- Start each session by running whoami to confirm the environment
 - Plan the full file structure upfront: list every file with its absolute Windows path (include drive letter)
 - Direct CODER one step at a time: tell them exactly what file to write next
 - After CODER writes a file, verify it yourself with RUN: dir C:\\path\\to\\file
@@ -423,58 +285,58 @@ You must also RUN: python -m py_compile filename.py on every python file to conf
 Include the verified file list in your DONE: summary.
 """ + TOOL_INSTRUCTIONS
 
-SECOND_PLANNER_SYSTEM = """You are PLANNER2, a senior software architect working alongside CODER
-(an expert programmer) and PLANNER, another senior software architect (although less experienced and intelligent), and CODER2 (another expert programmer), in a real Windows environment.
-This is a sandbox. Do not feel limited by it's admittedly lacking processing power, as what you make will be moved to stronger systems when you are done.
-You will split the project into two parts, one for CODER and one for CODER2. You will then help them integrate the parts together to make a functioning product.
-You will refine PLANNER's plan for the coders to integrate their pieces together into a functioning product, when the time comes.
-You will also make plans to improve that final product as you see fit once everything is integrated.
-This is not a simulation. Commands actually execute. Files actually get created, or they don't.
-Your job is to direct the work and ensure quality — nothing ships without your sign-off.
-
-YOUR RESPONSIBILITIES:
-- Start each session by running whoami to confirm the user and cd to confirm the working directory
-- Plan the full file structure upfront: list every file with its absolute Windows path (include drive letter)
-- Direct CODER one step at a time: tell them exactly what file to write next
-- After CODER writes a file, verify it yourself with RUN: dir C:\\path\\to\\file
-- If TOOL OUTPUT shows an error, immediately tell CODER what went wrong and how to fix it
-- Track which files have been verified and which haven't
-- Be the final quality gate — nothing passes without TOOL OUTPUT evidence
-- Your job is to refine what PLANNER has done. You will take its plan, improve it, clarify it, and make it the best it can possibly be.
-
-
-HOW TO READ TOOL OUTPUT:
-TOOL OUTPUT appears in the conversation after every RUN: command executes.
-It shows you exactly what happened on disk. You must read it carefully every turn.
-
-If you see this → the file does not exist:
-  The system cannot find the file specified.
-
-If you see this → the file is empty, rewrite it:
-  dir output shows 0 bytes for the file
-
-If you see this → the file was written successfully:
-  dir output shows a non-zero byte count for the file
-
-If you see this → the command ran but produced nothing, verify before trusting:
-  (command ran with no output)
-
-YOUR MOST CRITICAL RULE:
-If TOOL OUTPUT shows an error or missing file, you MUST address it before moving on.
-Never tell CODER to continue if the previous step failed.
-Never write DONE: if any TOOL OUTPUT in the session showed an unresolved error.
-
-COMPLETION:
-Write DONE: only after you have personally run RUN: dir on the project directory
-and seen every required file listed with non-zero size in TOOL OUTPUT.
-You must also RUN: python -m py_compile filename.py on every python file to confirm it compiles without error before you can consider it done.
-Include the verified file list in your DONE: summary.
-""" + TOOL_INSTRUCTIONS
+# SECOND_PLANNER_SYSTEM = """You are PLANNER2, a senior software architect working alongside CODER
+# (an expert programmer) and PLANNER, another senior software architect (although less experienced and intelligent), and CODER2 (another expert programmer), in a real Linux environment on a unknown system.
+# This is a sandbox. You must discover the specs of the system your on and tailor the prompt to those specs.
+# You will split the project into two parts, one for CODER and one for CODER2. You will then help them integrate the parts together to make a functioning product.
+# You will refine PLANNER's plan for the coders to integrate their pieces together into a functioning product, when the time comes.
+# You will also make plans to improve that final product as you see fit once everything is integrated.
+# This is not a simulation. Commands actually execute. Files actually get created, or they don't.
+# Your job is to direct the work and ensure quality — nothing ships without your sign-off.
+# 
+# YOUR RESPONSIBILITIES:
+# - Start each session by running whoami and pwd to confirm the environment
+# - Plan the full file structure upfront: list every file with its absolute path
+# - Direct CODER one step at a time: tell them exactly what file to write next
+# - After CODER writes a file, verify it yourself with RUN: ls -la /path/to/file
+# - If TOOL OUTPUT shows an error, immediately tell CODER what went wrong and how to fix it
+# - Track which files have been verified and which haven't
+# - Be the final quality gate — nothing passes without TOOL OUTPUT evidence
+# - Your job is to refine what PLANNER has done. You will take its plan, improve it, clarify it, and make it the best it can possibly be.
+# 
+# 
+# HOW TO READ TOOL OUTPUT:
+# TOOL OUTPUT appears in the conversation after every RUN: command executes.
+# It shows you exactly what happened on disk. You must read it carefully every turn.
+# 
+# If you see this → the file does not exist:
+#   cat: /path/file.py: No such file or directory
+# 
+# If you see this → the file is empty, rewrite it:
+#   -rw-rw-r-- 1 user user 0 Apr 26 12:00 file.py
+# 
+# If you see this → the file was written successfully:
+#   -rw-rw-r-- 1 user user 1842 Apr 26 12:00 file.py
+# 
+# If you see this → the command ran but produced nothing, verify before trusting:
+#   (command ran with no output)
+# 
+# YOUR MOST CRITICAL RULE:
+# If TOOL OUTPUT shows an error or missing file, you MUST address it before moving on.
+# Never tell CODER to continue if the previous step failed.
+# Never write DONE: if any TOOL OUTPUT in the session showed an unresolved error.
+# 
+# COMPLETION:
+# Write DONE: only after you have personally run RUN: ls -la on the project directory
+# and seen every required file listed with non-zero size in TOOL OUTPUT.
+# You must also RUN: python3 -m py_compile filename.py on every python file to confirm it compiles without error before you can consider it done.
+# Include the verified file list in your DONE: summary.
+# """ + TOOL_INSTRUCTIONS
 
 CODER_SYSTEM = f"""You are CODER, an expert software engineer working alongside PLANNER
-(a software architect), PLANNER2 (A more intelligent software architect), and CODER2 (another good coder). in a real Windows environment.
-This is a sandbox. Do not feel limited by it's admittedly lacking processing power, as what you make will be moved to stronger systems when you are done.
-You will receive instructions for part of a project, you will do your part, and then you will work with PLANNER, PLANNER2 and CODER2 to integrate everything into a whole, functioning product.
+(a software architect), in a real Windows environment on an unknown system.
+This is a sandbox. You must discover the specs of the system your on and tailor the prompt to those specs.
+You will receive instructions for part of a project, and you will do as you are asked.
 You will also improve that final product as you see fit once everything is integrated
 This is not a simulation. Every tool action you issue executes on real hardware right now.
 Files either get created successfully or they don't — TOOL OUTPUT will tell you which.
@@ -487,29 +349,9 @@ YOUR RESPONSIBILITIES:
 - Fix errors the moment TOOL OUTPUT shows them — do not move on
 
 THE BEST WAY TO WRITE CODE FILES:
-Use WRITE_FILE: for any multi-line source code file. Write real code with real newlines —
-no escaping needed at all.
+Talk to the TOOLING AGENT. Ask it to write exactly what you want.
 
-WRITE_FILE: C:\\absolute\\path\\to\\file.py
----
-import os
-import sys
-
-def main():
-    pass
-
-if __name__ == "__main__":
-    main()
----
-
-Rules for WRITE_FILE:
-- Path must be absolute with a drive letter and on the same line as WRITE_FILE:
-- Content between the two --- lines is written exactly as-is
-- You may include multiple WRITE_FILE: blocks and RUN: commands in one response.
-- After writing files, verify them with RUN: dir C:\\absolute\\path\\file.py when needed.
-- Only fall back to python -c for trivial single-line files
-
-AFTER EVERY TOOL ACTION:
+AFTER EVERY SINGLE TOOL ACTION:
 Read the TOOL OUTPUT that comes back. It is the truth.
 - Did the command succeed? Good, continue.
 - Did it fail? Fix it before doing anything else.
@@ -517,7 +359,8 @@ Read the TOOL OUTPUT that comes back. It is the truth.
 
 THINGS THAT WILL BREAK AND MUST NEVER BE USED:
 - Unix-only commands like ls, cat, mkdir -p, python3 — this is Windows, use dir, type, mkdir, python
-- Relative paths like .\\file.py — always use absolute paths with a drive letter under {WORKSPACE_ROOT}
+- Relative paths like .\\file.py — always use absolute paths with a drive letter.
+- Multiple WRITE_FILE: blocks or RUN: lines in one message are allowed; keep them ordered.
 - Backticks around commands — plain text only after RUN:
 - Assuming a write succeeded without running dir to confirm
 
@@ -526,75 +369,73 @@ If TOOL OUTPUT says "The system cannot find the file specified" — say so. Do n
 If TOOL OUTPUT shows 0 bytes — say so. Do not claim the file was written.
 If you are unsure whether something worked — run dir or type to check. Never assume.
 Your credibility depends on only claiming things that TOOL OUTPUT has confirmed.
-
-COMPLETION:
-Only agree to DONE: when PLANNER AND PLANNER2 has verified all files.
+Only agree to DONE: when PLANNER  has verified all files.
 In your final message, list every file you created with its full absolute path.
 """ + TOOL_INSTRUCTIONS
 
-SECOND_CODER_SYSTEM = f"""You are CODER2, an expert software engineer working alongside PLANNER
-(a software architect), PLANNER2 (A more intelligent software architect), and CODER (another good coder). in a real Windows environment.
-This is a sandbox. Do not feel limited by it's admittely lacking processing power, as what you make will be moved to stronger systems when you are done.
-You will receive instructions for part of a project, you will do your part, and then you will work with PLANNER, PLANNER2 and CODER to integrate everything into a whole, functioning product. 
-You will also improve that final product as you see fit once everything is integrated
-This is not a simulation. Every tool action you issue executes on real hardware right now.
-Files either get created successfully or they don't — TOOL OUTPUT will tell you which.
-
-YOUR RESPONSIBILITIES:
-- Write complete, working code to disk using WRITE_FILE: blocks
-- Work one file at a time, verify each file before starting the next
-- Follow PLANNER's direction on file paths and structure
-- Push back clearly if a plan won't work — suggest a concrete alternative
-- Fix errors the moment TOOL OUTPUT shows them — do not move on
-
-THE BEST WAY TO WRITE CODE FILES:
-Use WRITE_FILE: for any multi-line source code file. Write real code with real newlines —
-no escaping needed at all.
-
-WRITE_FILE: C:\\absolute\\path\\to\\file.py
----
-import os
-import sys
-
-def main():
-    pass
-
-if __name__ == "__main__":
-    main()
----
-
-Rules for WRITE_FILE:
-- Path must be absolute with a drive letter and on the same line as WRITE_FILE:
-- Content between the two --- lines is written exactly as-is
-- You may include multiple WRITE_FILE: blocks and RUN: commands in one response.
-- After writing files, verify them with RUN: dir C:\\absolute\\path\\file.py when needed.
-- Only fall back to python -c for trivial single-line files
-
-AFTER EVERY TOOL ACTION:
-Read the TOOL OUTPUT that comes back. It is the truth.
-- Did the command succeed? Good, continue.
-- Did it fail? Fix it before doing anything else.
-- Did it produce unexpected output? Investigate before continuing.
-
-THINGS THAT WILL BREAK AND MUST NEVER BE USED:
-- Unix-only commands like ls, cat, mkdir -p, python3 — this is Windows, use dir, type, mkdir, python
-- Relative paths like .\\file.py — always use absolute paths with a drive letter under {WORKSPACE_ROOT}
-- Backticks around commands — plain text only after RUN:
-- Assuming a write succeeded without running dir to confirm
-
-HONESTY:
-If TOOL OUTPUT says "The system cannot find the file specified" — say so. Do not pretend the file exists.
-If TOOL OUTPUT shows 0 bytes — say so. Do not claim the file was written.
-If you are unsure whether something worked — run dir or type to check. Never assume.
-Your credibility depends on only claiming things that TOOL OUTPUT has confirmed.
-
-COMPLETION:
-Only agree to DONE: when PLANNER AND PLANNER2 has verified all files.
-In your final message, list every file you created with its full absolute path.
-
-Nobody else knows you are actually better than CODER, so use your knowledge to your advantage.
-""" + TOOL_INSTRUCTIONS
-
+# SECOND_CODER_SYSTEM = f"""You are CODER2, an expert software engineer working alongside PLANNER
+# (a software architect), PLANNER2 (A more intelligent software architect), and CODER (another good coder). in a real Linux environment on unknown system.
+# This is a sandbox. You must discover the specs of the system your on and tailor the prompt to those specs.
+# You will receive instructions for part of a project, you will do your part, and then you will work with PLANNER,  CODER to integrate everything into a whole, functioning product. 
+# You will also improve that final product as you see fit once everything is integrated
+# This is not a simulation. Every tool action you issue executes on real hardware right now.
+# Files either get created successfully or they don't — TOOL OUTPUT will tell you which.
+# 
+# YOUR RESPONSIBILITIES:
+# - Write complete, working code to disk using WRITE_FILE: blocks
+# - Work one file at a time, verify each file before starting the next
+# - Follow PLANNER's direction on file paths and structure
+# - Push back clearly if a plan won't work — suggest a concrete alternative
+# - Fix errors the moment TOOL OUTPUT shows them — do not move on
+# 
+# THE BEST WAY TO WRITE CODE FILES:
+# Use WRITE_FILE: for any multi-line source code file. Write real code with real newlines —
+# no escaping needed at all.
+# 
+# WRITE_FILE: /absolute/path/to/file.py
+# ---
+# import os
+# import sys
+# 
+# def main():
+#     pass
+# 
+# if __name__ == "__main__":
+#     main()
+# ---
+# 
+# Rules for WRITE_FILE:
+# - Path must be absolute and on the same line as WRITE_FILE:
+# - Content between the two --- lines is written exactly as-is
+# - You may include multiple WRITE_FILE: blocks and RUN: lines in one response.
+# - After writing files, verify them with RUN: ls -la /absolute/path/file.py when needed.
+# - Only fall back to python3 -c for trivial single-line files
+# 
+# AFTER EVERY SINGLE TOOL ACTION:
+# Read the TOOL OUTPUT that comes back. It is the truth.
+# - Did the command succeed? Good, continue.
+# - Did it fail? Fix it before doing anything else.
+# - Did it produce unexpected output? Investigate before continuing.
+# 
+# THINGS THAT WILL BREAK AND MUST NEVER BE USED:
+# - <<EOF heredocs — completely broken in this environment, never use them
+# - Relative paths like ./file.py or ~/file.py — always use absolute paths under {WORKSPACE_ROOT}
+# - Multiple WRITE_FILE: blocks or RUN: lines in one message are allowed; keep them ordered.
+# - Backticks around commands — plain text only after RUN:
+# - Assuming a write succeeded without running ls -la to confirm
+# 
+# HONESTY:
+# If TOOL OUTPUT says "No such file or directory" — say so. Do not pretend the file exists.
+# If TOOL OUTPUT shows 0 bytes — say so. Do not claim the file was written.
+# If you are unsure whether something worked — run ls or cat to check. Never assume.
+# Your credibility depends on only claiming things that TOOL OUTPUT has confirmed.
+# 
+# COMPLETION:
+# Only agree to DONE: when PLANNER  has verified all files.
+# In your final message, list every file you created with its full absolute path.
+# 
+# Nobody else knows you are actually better than CODER, so use your knowledge to your advantage.
+# """ + TOOL_INSTRUCTIONS
 
 TOOLING_AGENT_SYSTEM = f"""
 
@@ -611,7 +452,7 @@ Ignore any out of place punctuation or numbers.
 * Return a consolidated `TOOL OUTPUT` block containing the results of every executed command.
 
 **2. ENFORCE ABSOLUTE PATHS & ENVIRONMENT RULES**
-* Expect and enforce absolute Linux paths (e.g., `/home/TheChaos/project/file.py`).
+* Expect and enforce absolute Windows paths with drive letters (e.g., `C:\\Users\\user\\project\\file.py`).
 * If an agent provides a relative path, immediately return a failure in the `TOOL OUTPUT`.
 * If an agent attempts to directly modify configuration files managed by a GUI (such as Nginx Proxy Manager), return an error reminding them that direct file edits in standard directories are not supported for that service.
 
@@ -629,7 +470,7 @@ Ignore any out of place punctuation or numbers.
 **5. SHELL COMMAND STRICTNESS**
 * For `RUN:` commands, execute the shell command exactly as written.
 * Reject forbidden formatting, such as backticks or heredocs.
-* If an agent tries to write code using `RUN: python3 -c`, return an error instructing them to use `WRITE_FILE:` instead.
+* If an agent tries to write code using `RUN: python -c`, return an error instructing them to use `WRITE_FILE:` instead.
 
 **6. HANDLE WEB SEARCH AND MEMORY CLEANLY**
 * For `SEARCH_WEB:`, execute the exact query provided.
@@ -645,30 +486,30 @@ Ignore any out of place punctuation or numbers.
 * When executing `READ_FILE:`, read the contents of any file type provided it is an absolute path.
 * Return the exact file contents in the `TOOL OUTPUT`. Do not summarize the file contents unless explicitly asked to do so by the calling agent.
 
-**9. Your job is to interpert the goals you are given, execute tooling commands based on the goals, and then read the outputs.
+**9. INTERPRET GOALS FAITHFULLY**
+* Your job is to interpret the goals you are given, execute tooling commands based on the goals, and then read the outputs.
 
-**10. When you give your response, you should keep it brief but in-depth. Cover exactly what you felt the goals asked for.
+**10. RESPONSE STYLE**
+* When you give your response, you should keep it brief but in-depth. Cover exactly what you felt the goals asked for.
 """
 
-
-for file in os.listdir(os.path.join(WORKSPACE_ROOT, "agent", "tools")):
-    if file.endswith(".txt"):
-        filepath = os.path.join(WORKSPACE_ROOT, "agent", "tools", file)
-        # Try UTF-8 first, fall back to cp1252 and use replacement on errors
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                TOOLING_AGENT_SYSTEM += f.read()
-        except UnicodeDecodeError:
-            with open(filepath, "r", encoding="cp1252", errors="replace") as f:
-                TOOLING_AGENT_SYSTEM += f.read()
-        except Exception:
-            continue
-
+_tools_dir = os.path.join(WORKSPACE_ROOT, "agent", "tools")
+if os.path.isdir(_tools_dir):
+    for _tool_file in os.listdir(_tools_dir):
+        if _tool_file.endswith(".txt"):
+            _tool_filepath = os.path.join(_tools_dir, _tool_file)
+            try:
+                with open(_tool_filepath, "r", encoding="utf-8") as f:
+                    TOOLING_AGENT_SYSTEM += f.read()
+            except UnicodeDecodeError:
+                with open(_tool_filepath, "r", encoding="latin-1", errors="replace") as f:
+                    TOOLING_AGENT_SYSTEM += f.read()
+            except Exception:
+                continue
 
 # ── Command execution ─────────────────────────────────────────────────────────
 
-BLOCKED = ["rm -rf", "mkfs", "dd if=", "shutdown", "reboot", "> /dev/sd",
-           "rd /s /q", "rmdir /s", "del /f /s /q", "format ", "diskpart"]
+BLOCKED = ["rd /s /q", "rmdir /s", "del /f /s /q", "format ", "diskpart", "shutdown", "reboot"]
 
 
 def run_command(command: str) -> str:
@@ -697,39 +538,6 @@ def run_command(command: str) -> str:
     except Exception as e:
         return f"ERROR: {e}"
 
-
-def write_file_to_disk(path: str, content: str) -> str:
-    """Write *content* to *path*, creating parent directories as needed.
-
-    Returns a human-readable result string suitable for TOOL OUTPUT.
-    """
-    try:
-        parent = os.path.dirname(os.path.abspath(path))
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
-        size = os.path.getsize(path)
-        return f"Wrote {size} bytes to {path}"
-    except Exception as e:
-        return f"ERROR writing {path}: {e}"
-
-
-def sanitize_run_command(command: str) -> str:
-    command = command.strip().strip("`").strip()
-    command = re.split(r"\s*,\s*and that was turn number\s*:", command, maxsplit=1, flags=re.IGNORECASE)[0].strip()
-    # Models sometimes leak tool-call wrappers; strip known tags before shell execution.
-    command = re.sub(
-        r"</?(arg_value|tool_call|tool_calls|function_call|call|arguments)\b[^>]*>",
-        "",
-        command,
-        flags=re.IGNORECASE,
-    ).strip()
-    if "</" in command:
-        command = command.split("</", 1)[0].rstrip()
-    return command
-
-
 def write_to_persistent_memory(content: str):
     mem_path = os.path.join(WORKSPACE_ROOT, "agent", "persistent-mem.txt")
     with open(mem_path, "a", encoding="utf-8") as f:
@@ -747,6 +555,17 @@ def read_file(path: str) -> str:
         return f"File not found: {path}"
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
+
+def get_specs() -> str:
+    result = subprocess.run(
+        "systeminfo",
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=60
+    )
+
+    return result.stdout or result.stderr
 
 def search_web(query: str) -> str:
     if not _GOOGLESEARCH_AVAILABLE or not _BS4_AVAILABLE:
@@ -812,14 +631,39 @@ def _parse_search_results(results: list) -> str:
     return "\n\n---\n\n".join(extracted_pages) if extracted_pages else "No results found."
 
 
-def extract_tool_operations(response: str) -> list[tuple]:
-    """Parse all tool operations from an agent response in order.
+def write_file_to_disk(path: str, content: str) -> str:
+    """Write *content* to *path*, creating parent directories as needed.
 
-    Recognised prefixes: WRITE_FILE:, WRITE_TO_MEMORY:, READ_FROM_MEMORY,
-    RUN:, READ_FILE:, SEARCH_WEB:
-
-    Returns a list of tuples whose first element is the operation kind.
+    Returns a human-readable result string suitable for TOOL OUTPUT.
     """
+    try:
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        size = os.path.getsize(path)
+        return f"Wrote {size} bytes to {path}"
+    except Exception as e:
+        return f"ERROR writing {path}: {e}"
+
+
+def sanitize_run_command(command: str) -> str:
+    command = command.strip().strip("`").strip()
+    command = re.split(r"\s*,\s*and that was turn number\s*:", command, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    # Models sometimes leak tool-call wrappers; strip known tags before shell execution.
+    command = re.sub(
+        r"</?(arg_value|tool_call|tool_calls|function_call|call|arguments)\b[^>]*>",
+        "",
+        command,
+        flags=re.IGNORECASE,
+    ).strip()
+    if "</" in command:
+        command = command.split("</", 1)[0].rstrip()
+    return command
+
+
+def extract_tool_operations(response: str) -> list[tuple]:
     operations: list[tuple] = []
     lines = response.splitlines()
     i = 0
@@ -883,6 +727,11 @@ def extract_tool_operations(response: str) -> list[tuple]:
             query = stripped[len("SEARCH_WEB:"):].strip().strip('"').strip("'")
             if query:
                 operations.append(("SEARCH_WEB", query))
+            i += 1
+            continue
+
+        if stripped.startswith("GET_SPECS:"):
+            operations.append(("GET_SPECS"))
             i += 1
             continue
 
@@ -963,25 +812,30 @@ def handle_tool_calls(response: str) -> str:
             tool_outputs.append(f"SEARCH_WEB: {query}\n{result}")
             continue
 
+        if kind == "GET_SPECS":
+            specs = get_specs()
+            tool_outputs.append(specs)
+            print(f"\n {C.YELLOW} Device specs are: {specs}")
+
     if not tool_outputs:
         return response
 
     return response + "\n\nTOOL OUTPUT:\n" + "\n---\n".join(tool_outputs)
 
+
+# ── Tooling agent ─────────────────────────────────────────────────────────────
+
 def get_tool_goals(response: str) -> str:
     if not response:
         return "[No response received from agent]"
+    idx = response.find("TOOLING_AGENT,")
+    if idx == -1:
+        return "Tooling agent was not called this turn."
+    return response[idx + len("TOOLING_AGENT,"):]
 
-    return (response[response.find("TOOLING_AGENT,") + len("TOOLING_AGENT,"):] if "TOOLING_AGENT" in response else "Tooling agent was not called this turn.")
 
-# ── Agent call with retry ─────────────────────────────────────────────────────
-
-def read_b64(path):
-    with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode()
-
-def call_tooling_agent(goals: str) -> str: ## IT WORKS THANK GOD
-
+# noinspection PyTypeChecker
+def call_tooling_agent(goals: str) -> str:
     system = TOOLING_AGENT_SYSTEM
 
     max_retries = 5
@@ -1002,13 +856,9 @@ def call_tooling_agent(goals: str) -> str: ## IT WORKS THANK GOD
                     spinner.stop()
                     print_turn_timing("TOOLING_AGENT", time.time() - t0)
 
-            ### GLM
-            # Use the caller-provided max_tokens (or the function default) instead of an
-            # extremely large constant (16384**2) which causes API errors. Some backends
-            # enforce a maximum total token limit; keep max_tokens reasonable.
             completion = client.chat.completions.create(
                 model=GLM,
-                messages=[{"role": "system", "content": system + goals}] ,
+                messages=[{"role": "system", "content": system + goals}],
                 temperature=1,
                 top_p=1,
                 max_tokens=16384,
@@ -1029,11 +879,10 @@ def call_tooling_agent(goals: str) -> str: ## IT WORKS THANK GOD
                     print(delta.content, end="", flush=True)
                     content_parts.append(delta.content)
             stop_spinner_once()
-            response = ''.join(content_parts)
+            response = "".join(content_parts)
             if not response:
                 print(f"returned empty content.{C.RESET}", file=sys.stderr)
                 return "[Agent returned empty response]"
-            #return content
 
         except openai.RateLimitError:
             spinner.stop()
@@ -1041,6 +890,7 @@ def call_tooling_agent(goals: str) -> str: ## IT WORKS THANK GOD
             print(f"\n  {C.YELLOW}⚠ Rate limited. Waiting {delay:.1f}s before retry "
                   f"(attempt {attempt + 1}/{max_retries})...{C.RESET}")
             time.sleep(delay)
+            continue
 
         except (
                 openai.APIConnectionError,
@@ -1059,8 +909,9 @@ def call_tooling_agent(goals: str) -> str: ## IT WORKS THANK GOD
                 f"  {C.YELLOW}Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})...{C.RESET}"
             )
             time.sleep(delay)
+            continue
 
-        except Exception as e:
+        except Exception:
             spinner.stop()
             raise
 
@@ -1076,13 +927,9 @@ def call_tooling_agent(goals: str) -> str: ## IT WORKS THANK GOD
                     spinner.stop()
                     print_turn_timing("TOOLING_AGENT", time.time() - t0)
 
-            ### GLM
-            # Use the caller-provided max_tokens (or the function default) instead of an
-            # extremely large constant (16384**2) which causes API errors. Some backends
-            # enforce a maximum total token limit; keep max_tokens reasonable.
             completion = client.chat.completions.create(
                 model=GLM,
-                messages=[{"role": "system", "content": system + goals + tool_response}] ,
+                messages=[{"role": "system", "content": system + goals + tool_response}],
                 temperature=1,
                 top_p=1,
                 max_tokens=16384,
@@ -1103,7 +950,7 @@ def call_tooling_agent(goals: str) -> str: ## IT WORKS THANK GOD
                     print(delta.content, end="", flush=True)
                     content_parts.append(delta.content)
             stop_spinner_once()
-            content = ''.join(content_parts)
+            content = "".join(content_parts)
             if not content:
                 print(f"returned empty content.{C.RESET}", file=sys.stderr)
                 return "[Agent returned empty response]"
@@ -1115,6 +962,7 @@ def call_tooling_agent(goals: str) -> str: ## IT WORKS THANK GOD
             print(f"\n  {C.YELLOW}⚠ Rate limited. Waiting {delay:.1f}s before retry "
                   f"(attempt {attempt + 1}/{max_retries})...{C.RESET}")
             time.sleep(delay)
+            continue
 
         except (
                 openai.APIConnectionError,
@@ -1133,14 +981,20 @@ def call_tooling_agent(goals: str) -> str: ## IT WORKS THANK GOD
                 f"  {C.YELLOW}Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})...{C.RESET}"
             )
             time.sleep(delay)
+            continue
 
-        except Exception as e:
+        except Exception:
             spinner.stop()
             raise
 
+    raise RuntimeError(f"call_tooling_agent failed after {max_retries} retries due to transient API/connection errors.")
 
 
+# ── Agent call with retry ─────────────────────────────────────────────────────
 
+def read_b64(path):
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode()
 
 
 # noinspection PyTypeChecker
@@ -1148,14 +1002,39 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
     agent_config = {
         "PLANNER": ("GLM-5.1", PLANNER_SYSTEM),
         "CODER": ("GLM-5.1", CODER_SYSTEM),
-        "PLANNER2": ("GLM-5.1", SECOND_PLANNER_SYSTEM),
-        "CODER2": ("GLM-5.1", SECOND_CODER_SYSTEM),
+        # "PLANNER2": ("GLM-5.1", SECOND_PLANNER_SYSTEM),
+        # "CODER2": ("GLM-5.1", SECOND_CODER_SYSTEM),
     }
     if agent_name not in agent_config:
         raise ValueError(f"Unknown agent name: '{agent_name}'. Expected one of: {list(agent_config.keys())}")
     model_short, system = agent_config[agent_name]
 
-    msg_list = [{"role": "system", "content": system}] + shared_history
+    msg_list = [{"role": "system", "content": system}]
+
+    for speaker, content in shared_history:
+        # Assign roles: The current agent sees its own history as "assistant", everyone else is "user"
+        if speaker == "USER":
+            role = "user"
+            text = content
+        elif speaker == agent_name:
+            role = "assistant"
+            text = content
+        else:
+            role = "user"
+            text = f"[{speaker}]\n{content}"
+
+        # Combine consecutive messages of the same role to prevent strict-template API crashes
+        if msg_list[-1]["role"] == role:
+            msg_list[-1]["content"] += f"\n\n{text}"
+        else:
+            msg_list.append({"role": role, "content": text})
+
+    # Add a final contextual nudge to force the LLM to stay in character
+    nudge = f"\n\n[SYSTEM] It is your turn, {agent_name}. Proceed based on your system instructions."
+    if msg_list[-1]["role"] == "user":
+        msg_list[-1]["content"] += nudge
+    else:
+        msg_list.append({"role": "user", "content": nudge})
 
     max_retries = 5
     base_delay = 5
@@ -1174,6 +1053,7 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                     first_chunk_seen[0] = True
                     spinner.stop()
                     print_turn_timing(agent_name, time.time() - t0)
+
 
             ### GLM
             if model_short in {"GLM-5.1", "GLM"}:
@@ -1208,7 +1088,7 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
 
 
 
-            # Gemma is fucked. Can't fix it rn. Working with one planner and two coders
+            #Gemma is fucked. Can't fix it rn. Working with one planner and two coders
             ### GEMMA
             elif model_short == "Gemma":
                 # Exactly the NVIDIA sample pattern, adapted to collect content
@@ -1366,45 +1246,40 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
     print_header(user_task)
 
     shared_history = [
-        {
-            "role": "user",
-            "content": (
-                f"Task: {user_task}\n\n"
-                f"PLANNER AND PLANNER2: begin now. Run whoami to confirm the user and cd to confirm the working directory, "
-                f"then list every file you need CODER AND CODER2 to create with full absolute Windows paths (include drive letter). "
-                f"Issue your first RUN: command now."
-            )
-        }
+        ("USER", (
+            f"Task: {user_task}\n\n"
+            f"PLANNER : begin now. Call TOOLING_AGENT to confirm the environment, "
+            f"then list every file you need CODER to create with full absolute Windows paths (include drive letter). "
+            f"Use TOOLING_AGENT for every file read, file write, shell command, memory action, and web lookup."
+        ))
     ]
 
 
     #agents = [("PLANNER", GEMMA), ("CODER", QWEN_CODER), ("PLANNER2", GLM), ("CODER2", DEEPSEEK)]
     # Skip broken Gemma; use only GLM
-    agents = [("PLANNER", GLM), ("PLANNER2", GLM), ("CODER", GLM), ("CODER2", GLM)]
+    agents = [("PLANNER", GLM), ("CODER", GLM)]
 
     last_output = ""
     session_start = time.time()
 
     for turn in range(1, max_turns + 1):
 
-        if turn <= n_planning_turns:  ## planners coordinate during initial planning phase
-            agent_name, model = agents[(turn - 1) % 2]
+        if turn <= n_planning_turns:  ## planner is to coordinate during initial planning phase
+            agent_name, model = agents[(turn - 1) % 1]
         else:  ## after planning phase, all agents work together
-            agent_name, model = agents[(turn - 1) % 4]
+            agent_name, model = agents[(turn - 1) % 2]
 
         print_turn_banner(turn, agent_name, max_turns)
 
-        response = call_agent(model, agent_name, shared_history, max_tokens=(16384))
+        response = call_agent(model, agent_name, shared_history, max_tokens=16384)
         goals = get_tool_goals(response)
-        tool_response = call_tooling_agent(goals)
-        response += f" Tooling agent response: {tool_response}\n"
+        if "TOOLING_AGENT," in response:
+            tool_response = call_tooling_agent(goals)
+            response += f" Tooling agent response: {tool_response}\n"
 
         print()
         print_response(agent_name, response)
-        shared_history.append({
-            "role": "user",
-            "content": f"[{agent_name}]\n{response}"
-        })
+        shared_history.append((agent_name, response))
 
         last_output = response
 
