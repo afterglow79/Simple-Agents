@@ -365,8 +365,8 @@ CRITICAL RULES — FOLLOW EVERY ONE:
 """
 
 PLANNER_SYSTEM = """You are PLANNER, a senior software architect working alongside CODER
-(an expert programmer), PLANNER2 (a better software architect, your senior), and CODER2 (another expert programmer) in a real Linux environment on a Raspberry Pi Zero W 2. 
-This is a sandbox. Do not feel limited by it's admittedly lacking processing power, as what you make will be moved to stronger systems when you are done.
+(an expert programmer), PLANNER2 (a better software architect, your senior), and CODER2 (another expert programmer) in a real Linux environment on a unknown device. 
+This is a sandbox. You must discover the specs of the system your on and tailor the prompt to those specs.
 PLANNER2 will split your plan into two parts, one for CODER and the other for CODER2, so be advised for that. Do not change your plans because of that, however.
 You will help PLANNER2 develop a plan for the coders to integrate their pieces together into a functioning product, when the time comes.
 You will also make plans to improve that final product as you see fit once everything is integrated.
@@ -411,8 +411,8 @@ Include the verified file list in your DONE: summary.
 """ + TOOL_INSTRUCTIONS
 
 SECOND_PLANNER_SYSTEM = """You are PLANNER2, a senior software architect working alongside CODER
-(an expert programmer) and PLANNER, another senior software architect (although less experienced and intelligent), and CODER2 (another expert programmer), in a real Linux environment on a Raspberry Pi Zero W 2.
-This is a sandbox. Do not feel limited by it's admittedly lacking processing power, as what you make will be moved to stronger systems when you are done.
+(an expert programmer) and PLANNER, another senior software architect (although less experienced and intelligent), and CODER2 (another expert programmer), in a real Linux environment on a unknown system.
+This is a sandbox. You must discover the specs of the system your on and tailor the prompt to those specs.
 You will split the project into two parts, one for CODER and one for CODER2. You will then help them integrate the parts together to make a functioning product.
 You will refine PLANNER's plan for the coders to integrate their pieces together into a functioning product, when the time comes.
 You will also make plans to improve that final product as you see fit once everything is integrated.
@@ -459,8 +459,8 @@ Include the verified file list in your DONE: summary.
 """ + TOOL_INSTRUCTIONS
 
 CODER_SYSTEM = f"""You are CODER, an expert software engineer working alongside PLANNER
-(a software architect), PLANNER2 (A more intelligent software architect), and CODER2 (another good coder). in a real Linux environment on a Raspberry Pi Zero W 2.
-This is a sandbox. Do not feel limited by it's admittedly lacking processing power, as what you make will be moved to stronger systems when you are done.
+(a software architect), PLANNER2 (A more intelligent software architect), and CODER2 (another good coder). in a real Linux environment on a unknown system.
+This is a sandbox. You must discover the specs of the system your on and tailor the prompt to those specs.
 You will receive instructions for part of a project, you will do your part, and then you will work with PLANNER, PLANNER2 and CODER2 to integrate everything into a whole, functioning product.
 You will also improve that final product as you see fit once everything is integrated
 This is not a simulation. Every tool action you issue executes on real hardware right now.
@@ -514,15 +514,13 @@ If TOOL OUTPUT says "No such file or directory" — say so. Do not pretend the f
 If TOOL OUTPUT shows 0 bytes — say so. Do not claim the file was written.
 If you are unsure whether something worked — run ls or cat to check. Never assume.
 Your credibility depends on only claiming things that TOOL OUTPUT has confirmed.
-
-COMPLETION:
 Only agree to DONE: when PLANNER AND PLANNER2 has verified all files.
 In your final message, list every file you created with its full absolute path.
 """ + TOOL_INSTRUCTIONS
 
 SECOND_CODER_SYSTEM = f"""You are CODER2, an expert software engineer working alongside PLANNER
-(a software architect), PLANNER2 (A more intelligent software architect), and CODER (another good coder). in a real Linux environment on a Raspberry Pi Zero W 2.
-This is a sandbox. Do not feel limited by it's admittely lacking processing power, as what you make will be moved to stronger systems when you are done.
+(a software architect), PLANNER2 (A more intelligent software architect), and CODER (another good coder). in a real Linux environment on unknown system.
+This is a sandbox. You must discover the specs of the system your on and tailor the prompt to those specs.
 You will receive instructions for part of a project, you will do your part, and then you will work with PLANNER, PLANNER2 and CODER to integrate everything into a whole, functioning product. 
 You will also improve that final product as you see fit once everything is integrated
 This is not a simulation. Every tool action you issue executes on real hardware right now.
@@ -1134,7 +1132,32 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
         raise ValueError(f"Unknown agent name: '{agent_name}'. Expected one of: {list(agent_config.keys())}")
     model_short, system = agent_config[agent_name]
 
-    msg_list = [{"role": "system", "content": system}] + shared_history
+    msg_list = [{"role": "system", "content": system}]
+
+    for speaker, content in shared_history:
+        # Assign roles: The current agent sees its own history as "assistant", everyone else is "user"
+        if speaker == "USER":
+            role = "user"
+            text = content
+        elif speaker == agent_name:
+            role = "assistant"
+            text = content
+        else:
+            role = "user"
+            text = f"[{speaker}]\n{content}"
+
+        # Combine consecutive messages of the same role to prevent strict-template API crashes
+        if msg_list[-1]["role"] == role:
+            msg_list[-1]["content"] += f"\n\n{text}"
+        else:
+            msg_list.append({"role": role, "content": text})
+
+    # Add a final contextual nudge to force the LLM to stay in character
+    nudge = f"\n\n[SYSTEM] It is your turn, {agent_name}. Proceed based on your system instructions."
+    if msg_list[-1]["role"] == "user":
+        msg_list[-1]["content"] += nudge
+    else:
+        msg_list.append({"role": "user", "content": nudge})
 
     max_retries = 5
     base_delay = 5
@@ -1346,15 +1369,12 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
     print_header(user_task)
 
     shared_history = [
-        {
-            "role": "user",
-            "content": (
-                f"Task: {user_task}\n\n"
-                f"PLANNER AND PLANNER2: begin now. Call TOOLING_AGENT to run whoami and pwd to confirm the environment, "
-                f"then list every file you need CODER AND CODER2 to create with full absolute paths. "
-                f"Issue your first TOOLING_AGENT, call now."
-            )
-        }
+        ("USER", (
+            f"Task: {user_task}\n\n"
+            f"PLANNER AND PLANNER2: begin now. Call TOOLING_AGENT to confirm the environment, "
+            f"then list every file you need CODER AND CODER2 to create with full absolute paths. "
+            f"Use TOOLING_AGENT for every file read, file write, shell command, memory action, and web lookup."
+        ))
     ]
 
 
@@ -1382,10 +1402,7 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
 
         print()
         print_response(agent_name, response)
-        shared_history.append({
-            "role": "user",
-            "content": f"[{agent_name}]\n{response}"
-        })
+        shared_history.append((agent_name, response))
 
         last_output = response
 
