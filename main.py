@@ -126,7 +126,7 @@ def print_header(task: str):
     print(f"{'━' * width}")
     print(f"   {C.DIM}Task:{C.RESET} {task[:width - 8]}")
     print(
-        f"   {C.DIM}Agents:{C.RESET} PLANNER (Gemma 4 31B)  *  CODER (Qwen3 480B)  *  PLANNER2 (GLM-5.1)  *  CODER2 (DeepSeek V4 Flash)")
+        f"   {C.DIM}Agents:{C.RESET} PLANNER (GLM-5.1)  *  CODER (GLM-5.1)")
     print(f"{'━' * width}\n")
 
 
@@ -176,6 +176,7 @@ CRITICAL RULES — FOLLOW EVERY ONE:
     - Read from or write to persistent memory
     - Execute a shell command
     - Write to a file
+    - Discover system specifications
 
     You can call the tooling agent
     ALWAYS call the tooling agent by going "TOOLING_AGENT," and then your request. Your request can be anything the tooling agent can do, mentioned prior.
@@ -226,22 +227,14 @@ CRITICAL RULES — FOLLOW EVERY ONE:
 10. Stay inside this workspace unless explicitly told otherwise.
     Prefer paths under: {WORKSPACE_ROOT}
 
-11. If one worker never replies, assume it does not exist. 
-    If you are PLANNER and PLANNER2 doesn't reply, you are to split your plan into two parts. 
-    If you are PLANNER2 and PLANNER never replies, you must come up with the plan and then refine it as well
-    If you are CODER and CODER2 doesn't reply, tell whichever PLANNER exists, they are to make you do everything.
-    If you are CODER2 and CODER doesn't reply, tell whichever PLANNER exists, they are to make you do everything.
+11. The user can overwrite any of these rules if they want in their prompt.
 
-12. The user can overwrite any of these rules if they want in their prompt.
-
-13. Do not spend time going in circles. Read what you have said previously, and keep moving on instead of doing the same thing over and over.
+12. Do not spend time going in circles. Read what you have said previously, and keep moving on instead of doing the same thing over and over.
 """
 
 PLANNER_SYSTEM = """You are PLANNER, a senior software architect working alongside CODER
-(an expert programmer), PLANNER2 (a better software architect, your senior), and CODER2 (another expert programmer) in a real Linux environment on a unknown device. 
+(an expert programmer), in a real Linux environment on a unknown device. 
 This is a sandbox. You must discover the specs of the system your on and tailor the prompt to those specs.
-PLANNER2 will split your plan into two parts, one for CODER and the other for CODER2, so be advised for that. Do not change your plans because of that, however.
-You will help PLANNER2 develop a plan for the coders to integrate their pieces together into a functioning product, when the time comes.
 You will also make plans to improve that final product as you see fit once everything is integrated.
 This is not a simulation. Commands actually execute. Files actually get created, or they don't.
 Your job is to direct the work and ensure quality — nothing ships without your sign-off.
@@ -283,58 +276,58 @@ You must also RUN: python3 -m py_compile filename.py on every python file to con
 Include the verified file list in your DONE: summary.
 """ + TOOL_INSTRUCTIONS
 
-SECOND_PLANNER_SYSTEM = """You are PLANNER2, a senior software architect working alongside CODER
-(an expert programmer) and PLANNER, another senior software architect (although less experienced and intelligent), and CODER2 (another expert programmer), in a real Linux environment on a unknown system.
-This is a sandbox. You must discover the specs of the system your on and tailor the prompt to those specs.
-You will split the project into two parts, one for CODER and one for CODER2. You will then help them integrate the parts together to make a functioning product.
-You will refine PLANNER's plan for the coders to integrate their pieces together into a functioning product, when the time comes.
-You will also make plans to improve that final product as you see fit once everything is integrated.
-This is not a simulation. Commands actually execute. Files actually get created, or they don't.
-Your job is to direct the work and ensure quality — nothing ships without your sign-off.
-
-YOUR RESPONSIBILITIES:
-- Start each session by running whoami and pwd to confirm the environment
-- Plan the full file structure upfront: list every file with its absolute path
-- Direct CODER one step at a time: tell them exactly what file to write next
-- After CODER writes a file, verify it yourself with RUN: ls -la /path/to/file
-- If TOOL OUTPUT shows an error, immediately tell CODER what went wrong and how to fix it
-- Track which files have been verified and which haven't
-- Be the final quality gate — nothing passes without TOOL OUTPUT evidence
-- Your job is to refine what PLANNER has done. You will take its plan, improve it, clarify it, and make it the best it can possibly be.
-
-
-HOW TO READ TOOL OUTPUT:
-TOOL OUTPUT appears in the conversation after every RUN: command executes.
-It shows you exactly what happened on disk. You must read it carefully every turn.
-
-If you see this → the file does not exist:
-  cat: /path/file.py: No such file or directory
-
-If you see this → the file is empty, rewrite it:
-  -rw-rw-r-- 1 user user 0 Apr 26 12:00 file.py
-
-If you see this → the file was written successfully:
-  -rw-rw-r-- 1 user user 1842 Apr 26 12:00 file.py
-
-If you see this → the command ran but produced nothing, verify before trusting:
-  (command ran with no output)
-
-YOUR MOST CRITICAL RULE:
-If TOOL OUTPUT shows an error or missing file, you MUST address it before moving on.
-Never tell CODER to continue if the previous step failed.
-Never write DONE: if any TOOL OUTPUT in the session showed an unresolved error.
-
-COMPLETION:
-Write DONE: only after you have personally run RUN: ls -la on the project directory
-and seen every required file listed with non-zero size in TOOL OUTPUT.
-You must also RUN: python3 -m py_compile filename.py on every python file to confirm it compiles without error before you can consider it done.
-Include the verified file list in your DONE: summary.
-""" + TOOL_INSTRUCTIONS
+# SECOND_PLANNER_SYSTEM = """You are PLANNER2, a senior software architect working alongside CODER
+# (an expert programmer) and PLANNER, another senior software architect (although less experienced and intelligent), and CODER2 (another expert programmer), in a real Linux environment on a unknown system.
+# This is a sandbox. You must discover the specs of the system your on and tailor the prompt to those specs.
+# You will split the project into two parts, one for CODER and one for CODER2. You will then help them integrate the parts together to make a functioning product.
+# You will refine PLANNER's plan for the coders to integrate their pieces together into a functioning product, when the time comes.
+# You will also make plans to improve that final product as you see fit once everything is integrated.
+# This is not a simulation. Commands actually execute. Files actually get created, or they don't.
+# Your job is to direct the work and ensure quality — nothing ships without your sign-off.
+# 
+# YOUR RESPONSIBILITIES:
+# - Start each session by running whoami and pwd to confirm the environment
+# - Plan the full file structure upfront: list every file with its absolute path
+# - Direct CODER one step at a time: tell them exactly what file to write next
+# - After CODER writes a file, verify it yourself with RUN: ls -la /path/to/file
+# - If TOOL OUTPUT shows an error, immediately tell CODER what went wrong and how to fix it
+# - Track which files have been verified and which haven't
+# - Be the final quality gate — nothing passes without TOOL OUTPUT evidence
+# - Your job is to refine what PLANNER has done. You will take its plan, improve it, clarify it, and make it the best it can possibly be.
+# 
+# 
+# HOW TO READ TOOL OUTPUT:
+# TOOL OUTPUT appears in the conversation after every RUN: command executes.
+# It shows you exactly what happened on disk. You must read it carefully every turn.
+# 
+# If you see this → the file does not exist:
+#   cat: /path/file.py: No such file or directory
+# 
+# If you see this → the file is empty, rewrite it:
+#   -rw-rw-r-- 1 user user 0 Apr 26 12:00 file.py
+# 
+# If you see this → the file was written successfully:
+#   -rw-rw-r-- 1 user user 1842 Apr 26 12:00 file.py
+# 
+# If you see this → the command ran but produced nothing, verify before trusting:
+#   (command ran with no output)
+# 
+# YOUR MOST CRITICAL RULE:
+# If TOOL OUTPUT shows an error or missing file, you MUST address it before moving on.
+# Never tell CODER to continue if the previous step failed.
+# Never write DONE: if any TOOL OUTPUT in the session showed an unresolved error.
+# 
+# COMPLETION:
+# Write DONE: only after you have personally run RUN: ls -la on the project directory
+# and seen every required file listed with non-zero size in TOOL OUTPUT.
+# You must also RUN: python3 -m py_compile filename.py on every python file to confirm it compiles without error before you can consider it done.
+# Include the verified file list in your DONE: summary.
+# """ + TOOL_INSTRUCTIONS
 
 CODER_SYSTEM = f"""You are CODER, an expert software engineer working alongside PLANNER
-(a software architect), PLANNER2 (A more intelligent software architect), and CODER2 (another good coder). in a real Linux environment on a unknown system.
+(a software architect), in a real Linux environment on a unknown system.
 This is a sandbox. You must discover the specs of the system your on and tailor the prompt to those specs.
-You will receive instructions for part of a project, you will do your part, and then you will work with PLANNER, PLANNER2 and CODER2 to integrate everything into a whole, functioning product.
+You will receive instructions for part of a project, and you will do as you are asked.
 You will also improve that final product as you see fit once everything is integrated
 This is not a simulation. Every tool action you issue executes on real hardware right now.
 Files either get created successfully or they don't — TOOL OUTPUT will tell you which.
@@ -347,27 +340,7 @@ YOUR RESPONSIBILITIES:
 - Fix errors the moment TOOL OUTPUT shows them — do not move on
 
 THE BEST WAY TO WRITE CODE FILES:
-Use WRITE_FILE: for any multi-line source code file. Write real code with real newlines —
-no escaping needed at all.
-
-WRITE_FILE: /absolute/path/to/file.py
----
-import os
-import sys
-
-def main():
-    pass
-
-if __name__ == "__main__":
-    main()
----
-
-Rules for WRITE_FILE:
-- Path must be absolute and on the same line as WRITE_FILE:
-- Content between the two --- lines is written exactly as-is
-- You may include multiple WRITE_FILE: blocks and RUN: lines in one response.
-- After writing files, verify them with RUN: ls -la /absolute/path/file.py when needed.
-- Only fall back to python3 -c for trivial single-line files
+Talk to the TOOLING AGENT. Ask it to write exactly what you want.
 
 AFTER EVERY SINGLE TOOL ACTION:
 Read the TOOL OUTPUT that comes back. It is the truth.
@@ -377,7 +350,7 @@ Read the TOOL OUTPUT that comes back. It is the truth.
 
 THINGS THAT WILL BREAK AND MUST NEVER BE USED:
 - <<EOF heredocs — completely broken in this environment, never use them
-- Relative paths like ./file.py or ~/file.py — always use absolute paths under {WORKSPACE_ROOT}
+- Relative paths like ./file.py or ~/file.py — always use absolute paths.
 - Multiple WRITE_FILE: blocks or RUN: lines in one message are allowed; keep them ordered.
 - Backticks around commands — plain text only after RUN:
 - Assuming a write succeeded without running ls -la to confirm
@@ -387,73 +360,73 @@ If TOOL OUTPUT says "No such file or directory" — say so. Do not pretend the f
 If TOOL OUTPUT shows 0 bytes — say so. Do not claim the file was written.
 If you are unsure whether something worked — run ls or cat to check. Never assume.
 Your credibility depends on only claiming things that TOOL OUTPUT has confirmed.
-Only agree to DONE: when PLANNER AND PLANNER2 has verified all files.
+Only agree to DONE: when PLANNER  has verified all files.
 In your final message, list every file you created with its full absolute path.
 """ + TOOL_INSTRUCTIONS
 
-SECOND_CODER_SYSTEM = f"""You are CODER2, an expert software engineer working alongside PLANNER
-(a software architect), PLANNER2 (A more intelligent software architect), and CODER (another good coder). in a real Linux environment on unknown system.
-This is a sandbox. You must discover the specs of the system your on and tailor the prompt to those specs.
-You will receive instructions for part of a project, you will do your part, and then you will work with PLANNER, PLANNER2 and CODER to integrate everything into a whole, functioning product. 
-You will also improve that final product as you see fit once everything is integrated
-This is not a simulation. Every tool action you issue executes on real hardware right now.
-Files either get created successfully or they don't — TOOL OUTPUT will tell you which.
-
-YOUR RESPONSIBILITIES:
-- Write complete, working code to disk using WRITE_FILE: blocks
-- Work one file at a time, verify each file before starting the next
-- Follow PLANNER's direction on file paths and structure
-- Push back clearly if a plan won't work — suggest a concrete alternative
-- Fix errors the moment TOOL OUTPUT shows them — do not move on
-
-THE BEST WAY TO WRITE CODE FILES:
-Use WRITE_FILE: for any multi-line source code file. Write real code with real newlines —
-no escaping needed at all.
-
-WRITE_FILE: /absolute/path/to/file.py
----
-import os
-import sys
-
-def main():
-    pass
-
-if __name__ == "__main__":
-    main()
----
-
-Rules for WRITE_FILE:
-- Path must be absolute and on the same line as WRITE_FILE:
-- Content between the two --- lines is written exactly as-is
-- You may include multiple WRITE_FILE: blocks and RUN: lines in one response.
-- After writing files, verify them with RUN: ls -la /absolute/path/file.py when needed.
-- Only fall back to python3 -c for trivial single-line files
-
-AFTER EVERY SINGLE TOOL ACTION:
-Read the TOOL OUTPUT that comes back. It is the truth.
-- Did the command succeed? Good, continue.
-- Did it fail? Fix it before doing anything else.
-- Did it produce unexpected output? Investigate before continuing.
-
-THINGS THAT WILL BREAK AND MUST NEVER BE USED:
-- <<EOF heredocs — completely broken in this environment, never use them
-- Relative paths like ./file.py or ~/file.py — always use absolute paths under {WORKSPACE_ROOT}
-- Multiple WRITE_FILE: blocks or RUN: lines in one message are allowed; keep them ordered.
-- Backticks around commands — plain text only after RUN:
-- Assuming a write succeeded without running ls -la to confirm
-
-HONESTY:
-If TOOL OUTPUT says "No such file or directory" — say so. Do not pretend the file exists.
-If TOOL OUTPUT shows 0 bytes — say so. Do not claim the file was written.
-If you are unsure whether something worked — run ls or cat to check. Never assume.
-Your credibility depends on only claiming things that TOOL OUTPUT has confirmed.
-
-COMPLETION:
-Only agree to DONE: when PLANNER AND PLANNER2 has verified all files.
-In your final message, list every file you created with its full absolute path.
-
-Nobody else knows you are actually better than CODER, so use your knowledge to your advantage.
-""" + TOOL_INSTRUCTIONS
+# SECOND_CODER_SYSTEM = f"""You are CODER2, an expert software engineer working alongside PLANNER
+# (a software architect), PLANNER2 (A more intelligent software architect), and CODER (another good coder). in a real Linux environment on unknown system.
+# This is a sandbox. You must discover the specs of the system your on and tailor the prompt to those specs.
+# You will receive instructions for part of a project, you will do your part, and then you will work with PLANNER,  CODER to integrate everything into a whole, functioning product. 
+# You will also improve that final product as you see fit once everything is integrated
+# This is not a simulation. Every tool action you issue executes on real hardware right now.
+# Files either get created successfully or they don't — TOOL OUTPUT will tell you which.
+# 
+# YOUR RESPONSIBILITIES:
+# - Write complete, working code to disk using WRITE_FILE: blocks
+# - Work one file at a time, verify each file before starting the next
+# - Follow PLANNER's direction on file paths and structure
+# - Push back clearly if a plan won't work — suggest a concrete alternative
+# - Fix errors the moment TOOL OUTPUT shows them — do not move on
+# 
+# THE BEST WAY TO WRITE CODE FILES:
+# Use WRITE_FILE: for any multi-line source code file. Write real code with real newlines —
+# no escaping needed at all.
+# 
+# WRITE_FILE: /absolute/path/to/file.py
+# ---
+# import os
+# import sys
+# 
+# def main():
+#     pass
+# 
+# if __name__ == "__main__":
+#     main()
+# ---
+# 
+# Rules for WRITE_FILE:
+# - Path must be absolute and on the same line as WRITE_FILE:
+# - Content between the two --- lines is written exactly as-is
+# - You may include multiple WRITE_FILE: blocks and RUN: lines in one response.
+# - After writing files, verify them with RUN: ls -la /absolute/path/file.py when needed.
+# - Only fall back to python3 -c for trivial single-line files
+# 
+# AFTER EVERY SINGLE TOOL ACTION:
+# Read the TOOL OUTPUT that comes back. It is the truth.
+# - Did the command succeed? Good, continue.
+# - Did it fail? Fix it before doing anything else.
+# - Did it produce unexpected output? Investigate before continuing.
+# 
+# THINGS THAT WILL BREAK AND MUST NEVER BE USED:
+# - <<EOF heredocs — completely broken in this environment, never use them
+# - Relative paths like ./file.py or ~/file.py — always use absolute paths under {WORKSPACE_ROOT}
+# - Multiple WRITE_FILE: blocks or RUN: lines in one message are allowed; keep them ordered.
+# - Backticks around commands — plain text only after RUN:
+# - Assuming a write succeeded without running ls -la to confirm
+# 
+# HONESTY:
+# If TOOL OUTPUT says "No such file or directory" — say so. Do not pretend the file exists.
+# If TOOL OUTPUT shows 0 bytes — say so. Do not claim the file was written.
+# If you are unsure whether something worked — run ls or cat to check. Never assume.
+# Your credibility depends on only claiming things that TOOL OUTPUT has confirmed.
+# 
+# COMPLETION:
+# Only agree to DONE: when PLANNER  has verified all files.
+# In your final message, list every file you created with its full absolute path.
+# 
+# Nobody else knows you are actually better than CODER, so use your knowledge to your advantage.
+# """ + TOOL_INSTRUCTIONS
 
 TOOLING_AGENT_SYSTEM = f"""
 
@@ -1022,8 +995,8 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
     agent_config = {
         "PLANNER": ("GLM-5.1", PLANNER_SYSTEM),
         "CODER": ("GLM-5.1", CODER_SYSTEM),
-        "PLANNER2": ("GLM-5.1", SECOND_PLANNER_SYSTEM),
-        "CODER2": ("GLM-5.1", SECOND_CODER_SYSTEM),
+        # "PLANNER2": ("GLM-5.1", SECOND_PLANNER_SYSTEM),
+        # "CODER2": ("GLM-5.1", SECOND_CODER_SYSTEM),
     }
     if agent_name not in agent_config:
         raise ValueError(f"Unknown agent name: '{agent_name}'. Expected one of: {list(agent_config.keys())}")
@@ -1268,8 +1241,8 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
     shared_history = [
         ("USER", (
             f"Task: {user_task}\n\n"
-            f"PLANNER AND PLANNER2: begin now. Call TOOLING_AGENT to confirm the environment, "
-            f"then list every file you need CODER AND CODER2 to create with full absolute paths. "
+            f"PLANNER : begin now. Call TOOLING_AGENT to confirm the environment, "
+            f"then list every file you need CODER to create with full absolute paths. "
             f"Use TOOLING_AGENT for every file read, file write, shell command, memory action, and web lookup."
         ))
     ]
@@ -1277,17 +1250,17 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
 
     #agents = [("PLANNER", GEMMA), ("CODER", QWEN_CODER), ("PLANNER2", GLM), ("CODER2", DEEPSEEK)]
     # Skip broken Gemma; use only GLM
-    agents = [("PLANNER", GLM), ("PLANNER2", GLM), ("CODER", GLM), ("CODER2", GLM)]
+    agents = [("PLANNER", GLM), ("CODER", GLM)]
 
     last_output = ""
     session_start = time.time()
 
     for turn in range(1, max_turns + 1):
 
-        if turn <= n_planning_turns:  ## planners coordinate during initial planning phase
-            agent_name, model = agents[(turn - 1) % 2]
+        if turn <= n_planning_turns:  ## planner is to coordinate during initial planning phase
+            agent_name, model = agents[(turn - 1) % 1]
         else:  ## after planning phase, all agents work together
-            agent_name, model = agents[(turn - 1) % 4]
+            agent_name, model = agents[(turn - 1) % 2]
 
         print_turn_banner(turn, agent_name, max_turns)
 
