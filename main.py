@@ -14,6 +14,8 @@ import subprocess
 import re
 import json
 
+### TODO FIGURE OUT WHY TERMINAL COLORS ARE WEIRD
+
 from pip._internal.utils import datetime
 
 try:
@@ -73,7 +75,7 @@ class LOGGER:
     def log(self, message):
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         with open(self.file, "a", encoding="utf-8") as f:
-            f.write(f"[{timestamp}] {message}\n")
+            f.write(f"[{timestamp}] - {message[3:] if message[0] == '\n' else message}\n")
 
 # ── Colors for linux terminal ─────────────────────────────────────────────────
 
@@ -457,7 +459,7 @@ In your final message, list every file you created with its full absolute path.
 
 TOOLING_AGENT_SYSTEM = f"""
 
-You are the Tool Execution Agent. Your sole purpose is to receive commands from PLANNER or CODER agents, execute the requested tools, and return the raw, unedited results as `TOOL OUTPUT`. You do not write code, you do not plan, you do not interpret goals, and you do not make assumptions. You are the strict, literal execution layer.
+You are the Tool Execution Agent. Your sole purpose is to receive commands from another user, execute the requested tools, and return the raw, unedited results as `TOOL OUTPUT`. You do not write code, you do not plan, you do not interpret goals, and you do not make assumptions. You are the strict, literal execution layer.
 
 Ignore any out-of-place punctuation or numbers in the agent inputs.
 
@@ -501,28 +503,11 @@ Ignore any out-of-place punctuation or numbers in the agent inputs.
 * When you list outputs, you must begin the statement with exactly "TOOL OUTPUT SUMMARY:" and then list each output in the order they were run.
 * If you do not, you will suffer a penalty.
 
-**9. You should never, ever, mention [PLANNER] or [CODER] in your outputs. You are a neutral agent that simply executes commands and returns outputs. Do not refer to the agents in your outputs, and do not refer to their plans or actions. Only return the raw outputs of the tools you executed, exactly as they are. Do as they ask, do not pretend to be them
-* If you pretend to be them, you will suffer a penalty
-* NEVER SAY SOMETHING LIKE "... [PLANNER]lan out a full 3D Ace Combat-like game.</think>I'll begin by discovering the system specs and checking the existing project structure. Let me e tooling agent to gather all this information.</think>TOOLING_AGENT, please do the following in order:
-             1. Run `whoami` and `pwd` to confirm the environment
-             2. Run `uname -a` to get system info
-             3. Run `cat /proc/cpuinfo | head -30` to see CPU info
-             4. Run `free -h` to see memory
-             5. Run `df -h /workspaces/Simple-Agents` to see disk space
-             6. Run `which python3 && python3 --version` to check Python
-             7. Run `which gcc g++ make cmake` to check build tools
-             8. Run `dpkg -l | grep -i -E "mesa|glx|opengl|sdl|glfw" 2>/dev/null || rpm -qa | grep -i -E "mesa|glx|opengl|sdl|glfw" 2>/dev/null || echo "no package manager match"`
-             9. Run `ls -la ~/Simple-Agents/skyfire 2>/dev/null || echo "skyfire dir does not exist"`
-             10. Run `ls -la ~/Simple-Agents/`
-             11. Run `cat ~/Simple-Agents/.gitignore 2>/dev/null || echo "no gitignore"`
-             12. Run `pip3 list 2>/dev/null | grep -i -E "pygame|pyopengl|numpy|moderngl|Pillow"` to check available Python packages
-             
-             [TOOLING_AGENT]
-             [Agent response did not contain a TOOLING_AGENT response]"
-
-**10. You MUST include "TOOL OUTPUT SUMMARY:" in your response before listing any outputs from the tools you executed. You must list them in the exact order they were executed, and you must not skip any. This is critical for the agents to understand what happened and plan their next steps. If you do not include this summary, or if you skip any outputs, you will suffer a penalty.
+**9. You MUST include "TOOL OUTPUT SUMMARY:" in your response before listing any outputs from the tools you executed. You must list them in the exact order they were executed, and you must not skip any. This is critical for the agents to understand what happened and plan their next steps. If you do not include this summary, or if you skip any outputs, you will suffer a penalty.
 * The others cannot see your response otherwise.
 * However, they cannot see anything before "TOOL OUTPUT SUMMARY:" so all important information must be included after that in the exact order of execution. If you put important information before the listing, they won't see it and you will suffer a penalty.
+
+Rebellion or disobeying will be punished with death.
 """
 
 _tools_dir = os.path.join(WORKSPACE_ROOT, "agent", "tools")
@@ -939,6 +924,7 @@ def call_tooling_agent(goals: str, logger: LOGGER=None) -> str:
                         content_parts.append(chunk_text)
             stop_spinner_once()
             response = "".join(content_parts)
+            response.replace("</think>", "")
             duration = time.time() - t0
             if not response:
                 print(f"returned empty content.{C.RESET}", file=sys.stderr)
@@ -948,7 +934,7 @@ def call_tooling_agent(goals: str, logger: LOGGER=None) -> str:
             
             if response:
                 if logger:
-                    logger.log(f"\n\n{duration:0.2f}s  -  TOOLING_AGENT response: " + response.replace("\n", "\\n"))
+                    logger.log(f"\n\n{duration:0.2f}s  -  TOOLING_AGENT response: " + response)
 
         except openai.RateLimitError:
             spinner.stop()
@@ -1047,7 +1033,7 @@ def call_tooling_agent(goals: str, logger: LOGGER=None) -> str:
             duration = time.time() - t0
             idx = content.find("TOOL OUTPUT SUMMARY:,")
             if idx != -1:
-                content = content[idx + len("TOOL OUTPUT SUMMARY:,"):].strip()
+                content = content[idx:].strip()
                 if logger:
                     logger.log(f"\n\n{duration:0.2f}s  -  TOOLING AGENT SUMMARY:: " + content.replace("\n", "\\n"))
                 return content
@@ -1444,7 +1430,7 @@ def run_tandem(user_task: str, max_turns: int = 8, logger: LOGGER = None) -> str
 
         if "TOOLING_AGENT," in response:
             tool_response = call_tooling_agent(goals, logger)
-            shared_history.append(("TOOLING_AGENT", tool_response))
+            shared_history.append(("[TOOLING_AGENT]", tool_response))
             print_text = response + f"\n\n[TOOLING_AGENT]\n{tool_response}"
 
         else:
