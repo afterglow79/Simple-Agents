@@ -14,6 +14,8 @@ import subprocess
 import re
 import json
 
+from pip._internal.utils import datetime
+
 try:
     from bs4 import BeautifulSoup as _BeautifulSoup
     _BS4_AVAILABLE = True
@@ -454,7 +456,7 @@ Ignore any out-of-place punctuation or numbers in the agent inputs.
 ════════════════════════════════════════
 
 **1. MULTIPLE TOOL ACTIONS PER RESPONSE**
-* Process and execute multiple tool commands (`WRITE_FILE:`, `RUN:`, `SEARCH_WEB:`, `READ_FILE:`, etc.) in the exact sequential order they are received.
+* Process and execute multiple tool commands (`WRITE_FILE:`, ` RUN:`, `SEARCH_WEB:`, `READ_FILE:`, etc.) in the exact sequential order they are received.
 * Return a single, consolidated `TOOL OUTPUT` block containing the results of every executed command.
 * Once you exectue any tool commands, your turn will end. This means you must execute commands in the exact order necessary and any commands you are asked to run must be run together
 * If the requests you recieve for tooling require you to do something before you can do those requests, do those things.
@@ -485,7 +487,7 @@ Ignore any out-of-place punctuation or numbers in the agent inputs.
 * If an agent emits `DONE:` but your logs show the previous command failed, intercept the signal and return an error reminding them they cannot claim success without evidence.
 * If an agent repeats the exact same failing command multiple times, append a system warning to the `TOOL OUTPUT` instructing them to change their approach.
 
-**8. If you receieve tooling outputs, your job is to summarize them for the next agent.
+**8. If you receieve tooling outputs, your job is to tell it exactly as it is for the next agent. Always return the full output as you see it.
 """
 
 _tools_dir = os.path.join(WORKSPACE_ROOT, "agent", "tools")
@@ -750,7 +752,7 @@ def handle_tool_calls(response: str) -> str:
     for operation in operations:
         kind = operation[0]
 
-        if kind == "WRITE_FILE":
+        if kind == 'WRITE_FILE':
             _, path, content = operation
             print(f"\n  {C.YELLOW}✎ Writing file:{C.RESET} {path}")
             result = write_file_to_disk(path, content)
@@ -952,7 +954,7 @@ def call_tooling_agent(goals: str) -> str:
                 model=GLM,
                 messages=[
                     {"role": "system", "content": system},
-                    {"role": "user", "content": f"Please summarize the following tool outputs:\n{tool_response}"}
+                    {"role": "user", "content": f"This is the tool response, report it back exactly as it is:\n{tool_response}"}
                 ],
                 temperature=1,
                 stop=["[PLANNER]", "[CODER]", "PLANNER:", "CODER:", "PLANNER TURN"],  # Added stop sequences
@@ -1391,7 +1393,7 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
 
         if(log):
             with open("log.txt", "a", encoding="utf-8") as log_file:
-                log_file.write(f"TURN {turn} - {agent_name}, Duration: {end - begin:.2f}s\n")
+                log_file.write(f"{time.time()}     TURN {turn} - {agent_name}, Duration: {end - begin:.2f}s\n")
                 log_file.write(print_text + "\n\n")
 
         if "DONE:" in response:
