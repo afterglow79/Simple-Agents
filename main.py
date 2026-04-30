@@ -32,7 +32,7 @@ parser = argparse.ArgumentParser(description="Tandem agentic AI operations.")
 
 parser.add_argument("--max_turns", type=int, default=25)
 parser.add_argument("--task", type=str)
-parser.add_argument("--init_planning_turns", type=int, default = 6)
+parser.add_argument("--init_planning_turns", type=int, default = 0)
 parser.add_argument("--can_use_web_search", type=bool, default=False)
 parser.add_argument("--log", type=bool, default=False)
 
@@ -64,6 +64,16 @@ QWEN_CODER = "qwen/qwen3-coder-480b-a35b-instruct"
 GEMMA = "google/gemma-4-31b-it"
 DEEPSEEK = "deepseek-ai/deepseek-v4-flash"
 
+# ── Logging utility ─────────────────────────────────────────────────────────────
+
+class LOGGER:
+    def __init__(self, file):
+        self.file = file
+    
+    def log(self, message):
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        with open(self.file, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {message}\n")
 
 # ── Colors for linux terminal ─────────────────────────────────────────────────
 
@@ -488,6 +498,8 @@ Ignore any out-of-place punctuation or numbers in the agent inputs.
 * If an agent repeats the exact same failing command multiple times, append a system warning to the `TOOL OUTPUT` instructing them to change their approach.
 
 **8. If you receieve tooling outputs, your job is to tell it exactly as it is for the next agent. Always return the full output as you see it.
+* When you list outputs, you must begin the statement with exactly "TOOL OUTPUT SUMMARY:" and then list each output in the order they were run.
+* If you do not, you will suffer a penalty.
 """
 
 _tools_dir = os.path.join(WORKSPACE_ROOT, "agent", "tools")
@@ -1001,8 +1013,14 @@ def call_tooling_agent(goals: str) -> str:
             if not content:
                 print(f"returned empty content.{C.RESET}", file=sys.stderr)
                 return "[Agent returned empty response]"
-            return content
 
+            idx = content.find("TOOL OUTPUT SUMMARY:,")
+            if idx != -1:
+                content = content[idx + len("TOOL OUTPUT SUMMARY:,"):].strip()
+                return content
+            else:
+                print(f"TOOLING_AGENT was called but no response found in content.{C.RESET}", file=sys.stderr)
+                return "[Agent response did not contain a TOOLING_AGENT response]"
         except openai.RateLimitError:
             spinner.stop()
             delay = base_delay * (2 ** attempt) + random.uniform(0, 2)
@@ -1344,7 +1362,7 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
-def run_tandem(user_task: str, max_turns: int = 8) -> str:
+def run_tandem(user_task: str, max_turns: int = 8, logger: LOGGER = None) -> str:
     print_header(user_task)
 
     shared_history = [
@@ -1393,8 +1411,8 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
 
         if(log):
             with open("log.txt", "a", encoding="utf-8") as log_file:
-                log_file.write(f"{time.time()}     TURN {turn} - {agent_name}, Duration: {end - begin:.2f}s\n")
-                log_file.write(print_text + "\n\n")
+                log_file.write(f"TURN {turn} - {agent_name}, Duration: {end - begin:.2f}s\n")
+                log_file.write(response + "\n\n")
 
         if "DONE:" in response:
             print_done(agent_name, time.time() - session_start, turn)
@@ -1411,8 +1429,13 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
 
 print("Starting!")
 print(f"Prompt is: {task}")
+if log:
+    logger = LOGGER("log.txt")
+    logger.log("Session started.")
+    logger.log(f"Prompt for this session is: {task}")
 
 run_tandem(
     user_task=task,
-    max_turns=max_turns
+    max_turns=max_turns,
+    logger=logger if log else None
 )
