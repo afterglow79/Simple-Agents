@@ -704,6 +704,7 @@ def extract_tool_operations(response: str) -> list[tuple]:
 
     while i < len(lines):
         stripped = lines[i].strip()
+        stripped = stripped.replace("</think>", "")
         if not stripped:
             i += 1
             continue
@@ -869,7 +870,7 @@ def get_tool_goals(response: str) -> str:
 
 
 # noinspection PyTypeChecker
-def call_tooling_agent(goals: str) -> str:
+def call_tooling_agent(goals: str, logger: LOGGER=None) -> str:
     system = TOOLING_AGENT_SYSTEM
 
     max_retries = 5
@@ -938,9 +939,16 @@ def call_tooling_agent(goals: str) -> str:
                         content_parts.append(chunk_text)
             stop_spinner_once()
             response = "".join(content_parts)
+            duration = time.time() - t0
             if not response:
                 print(f"returned empty content.{C.RESET}", file=sys.stderr)
+                if logger:
+                    logger.log(f"{duration:0.2f}s  -  TOOLING_AGENT returned empty response.")
                 return "[Agent returned empty response]"
+            
+            if response:
+                if logger:
+                    logger.log(f"\n\n{duration:0.2f}s  -  TOOLING_AGENT response: " + response.replace("\n", "\\n"))
 
         except openai.RateLimitError:
             spinner.stop()
@@ -1036,13 +1044,17 @@ def call_tooling_agent(goals: str) -> str:
             if not content:
                 print(f"returned empty content.{C.RESET}", file=sys.stderr)
                 return "[Agent returned empty response]"
-
+            duration = time.time() - t0
             idx = content.find("TOOL OUTPUT SUMMARY:,")
             if idx != -1:
                 content = content[idx + len("TOOL OUTPUT SUMMARY:,"):].strip()
+                if logger:
+                    logger.log(f"\n\n{duration:0.2f}s  -  TOOLING AGENT SUMMARY:: " + content.replace("\n", "\\n"))
                 return content
             else:
                 print(f"TOOLING_AGENT was called but no response found in content.{C.RESET}", file=sys.stderr)
+                if logger:
+                    logger.log(f"\n\n{duration:0.2f}s  -  TOOLING AGENT DID NOT HAVE A SUMMARY")
                 return "[Agent response did not contain a TOOLING_AGENT response]"
             
         except openai.RateLimitError:
@@ -1087,7 +1099,7 @@ def read_b64(path):
 
 
 # noinspection PyTypeChecker
-def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=16384) -> str:
+def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=16384, logger: LOGGER=None) -> str:
     agent_config = {
         "PLANNER": ("GLM-5.1", PLANNER_SYSTEM),
         "CODER": ("GLM-5.1", CODER_SYSTEM),
@@ -1127,7 +1139,7 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
 
     max_retries = 5
     base_delay = 5
-
+    begin = time.time()
     for attempt in range(max_retries):
         spinner = Spinner(agent_name, model_short)
         spinner.start()
@@ -1347,9 +1359,15 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                 raise ValueError(f"Unsupported model_short '{model_short}' for agent '{agent_name}'.")
 
             content = "".join(content_parts)
+            end = time.time()
+            duration = end - begin
             if not content:
                 print(f"{C.RED}[{agent_name}] returned empty content.{C.RESET}", file=sys.stderr)
+                if logger:
+                    logger.log(f"{duration:0.2f}s  -  {agent_name} returned empty response.")
                 return "[Agent returned empty response]"
+            if content:
+                logger.log(f"\n\n{duration:0.2f}s  -  {agent_name} response: " + content) if logger else None
             return content
 
         except openai.RateLimitError:
@@ -1407,36 +1425,36 @@ def run_tandem(user_task: str, max_turns: int = 8, logger: LOGGER = None) -> str
     session_start = time.time()
 
     for turn in range(1, max_turns + 1):
-
+        begin = time.time()
         if turn <= n_planning_turns:  ## planner is to coordinate during initial planning phase
             agent_name, model = agents[(turn - 1) % 1]
         else:  ## after planning phase, all agents work together
             agent_name, model = agents[(turn - 1) % 2]
 
         print_turn_banner(turn, agent_name, max_turns)
-        begin = time.time()
-        response = call_agent(model, agent_name, shared_history, max_tokens=16384)
+        
+        response = call_agent(model, agent_name, shared_history, max_tokens=16384, logger=logger)
         goals = get_tool_goals(response)
 
         shared_history.append((agent_name, response))
+        end = time.time()
+        if(log):
+            with open("log.txt", "a", encoding="utf-8") as log_file:
+                log_file.write(f"TURN {turn} - {agent_name}, Duration: {end - begin:0.2f}s\n")
 
         if "TOOLING_AGENT," in response:
-            tool_response = call_tooling_agent(goals)
+            tool_response = call_tooling_agent(goals, logger)
             shared_history.append(("TOOLING_AGENT", tool_response))
             print_text = response + f"\n\n[TOOLING_AGENT]\n{tool_response}"
+
         else:
             print_text = response
 
-        end = time.time()
+        
         print()
         print_response(agent_name, print_text)
 
         last_output = print_text
-
-        if(log):
-            with open("log.txt", "a", encoding="utf-8") as log_file:
-                log_file.write(f"TURN {turn} - {agent_name}, Duration: {end - begin:.2f}s\n")
-                log_file.write(response + "\n\n")
 
         if "DONE:" in response:
             print_done(agent_name, time.time() - session_start, turn)
@@ -1454,9 +1472,10 @@ def run_tandem(user_task: str, max_turns: int = 8, logger: LOGGER = None) -> str
 print("Starting!")
 print(f"Prompt is: {task}")
 if log:
-    logger = LOGGER("log.txt")
-    logger.log("Session started.")
+    logger = LOGGER(f"logs/log-{time.ctime(time.time()).replace(' ', '_').replace(':', '-')}.txt")
+    logger.log(f"Session started.")
     logger.log(f"Prompt for this session is: {task}")
+
 
 run_tandem(
     user_task=task,
