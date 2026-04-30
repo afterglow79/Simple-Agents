@@ -859,13 +859,12 @@ def handle_tool_calls(response: str) -> str:
 
 # ── Tooling agent ─────────────────────────────────────────────────────────────
 
-def get_tool_goals(response: str) -> str: ## TODO REWORK
+def get_tool_goals(response: str) -> str:
     if not response:
         return "[No response received from agent]"
     idx = response.find("TOOLING_AGENT,")
     if idx == -1:
         return "Tooling agent was not called this turn."
-    print(response[idx + len("TOOLING_AGENT,"):])
     return response[idx + len("TOOLING_AGENT,"):]
 
 
