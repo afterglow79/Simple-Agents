@@ -96,6 +96,20 @@ _USE_COLOR = sys.stdout.isatty() and os.getenv("NO_COLOR") is None
 _REASONING_COLOR = "\033[90m" if _USE_COLOR else ""
 _RESET_COLOR = "\033[0m" if _USE_COLOR else ""
 
+# Patch the color class to be no-ops if not a TTY
+if not _USE_COLOR:
+    class C:
+        RESET = ""
+        BOLD = ""
+        DIM = ""
+        CYAN = ""
+        GREEN = ""
+        YELLOW = ""
+        BLUE = ""
+        RED = ""
+        MAGENTA = ""
+        UNDERLINE = ""
+
 
 # ── Spinner ───────────────────────────────────────────────────────────────────
 
@@ -868,6 +882,7 @@ def call_tooling_agent(goals: str, logger: LOGGER=None) -> str:
 
         try:
             content_parts = []
+            had_reasoning = False
             first_chunk_seen = [False]
 
             def stop_spinner_once():
@@ -886,7 +901,7 @@ def call_tooling_agent(goals: str, logger: LOGGER=None) -> str:
                 stop=["[PLANNER]", "[CODER]", "PLANNER:", "CODER:", "PLANNER TURN"],  # Added stop sequences
                 top_p=1,
                 max_tokens=16384,
-                extra_body={"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}},
+                extra_body={"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": True}},
                 stream=True,
             )
             for chunk in completion:
@@ -899,8 +914,12 @@ def call_tooling_agent(goals: str, logger: LOGGER=None) -> str:
                 reasoning = getattr(delta, "reasoning_content", None)
                 if reasoning:
                     print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
+                    had_reasoning = True
                 if getattr(delta, "content", None) is not None:
                     chunk_text = delta.content
+                    if had_reasoning and not content_parts:
+                        print(f"\n{_RESET_COLOR}", end="", flush=True)
+                        had_reasoning = False
                     full_so_far = "".join(content_parts) + chunk_text
 
                     # --- NEW: Manual Stop Sequence Detection ---
@@ -924,7 +943,7 @@ def call_tooling_agent(goals: str, logger: LOGGER=None) -> str:
                         content_parts.append(chunk_text)
             stop_spinner_once()
             response = "".join(content_parts)
-            response.replace("</think>", "")
+            response = response.replace("</think>", "").strip()
             duration = time.time() - t0
             if not response:
                 print(f"returned empty content.{C.RESET}", file=sys.stderr)
@@ -968,111 +987,24 @@ def call_tooling_agent(goals: str, logger: LOGGER=None) -> str:
             raise
 
         tool_response = handle_tool_calls(response)
+        duration = time.time() - t0
 
-        try:
-            content_parts = []
-            first_chunk_seen = [False]
+        # Extract only the actual tool output (strip the model's reasoning/preamble).
+        # handle_tool_calls appends "\n\nTOOL OUTPUT:\n..." to the raw response,
+        # so we just need everything from "TOOL OUTPUT:" onward.
+        summary_marker = "TOOL OUTPUT:"
+        marker_idx = tool_response.find(summary_marker)
+        if marker_idx != -1:
+            clean_summary = "TOOL OUTPUT SUMMARY:\n" + tool_response[marker_idx + len(summary_marker):].strip()
+        else:
+            # No tool operations were actually parsed — return the model text as-is
+            # (it may have explained why it can't run the command)
+            clean_summary = "TOOL OUTPUT SUMMARY:\n" + tool_response.strip()
 
-            def stop_spinner_once():
-                if not first_chunk_seen[0]:
-                    first_chunk_seen[0] = True
-                    spinner.stop()
-                    print_turn_timing("TOOLING_AGENT", time.time() - t0)
+        if logger:
+            logger.log(f"\n\n{duration:0.2f}s  -  TOOLING AGENT SUMMARY: " + clean_summary.replace("\n", "\\n"))
 
-            completion = client.chat.completions.create(
-                model=GLM,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": f"This is the tool response, report it back exactly as it is:\n{tool_response}"}
-                ],
-                temperature=1,
-                stop=["[PLANNER]", "[CODER]", "PLANNER:", "CODER:", "PLANNER TURN"],  # Added stop sequences
-                top_p=1,
-                max_tokens=16384,
-                extra_body={"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}},
-                stream=True,
-            )
-            for chunk in completion:
-                stop_spinner_once()
-                if not getattr(chunk, "choices", None) or len(chunk.choices) == 0:
-                    continue
-                delta = getattr(chunk.choices[0], "delta", None)
-                if delta is None:
-                    continue
-                reasoning = getattr(delta, "reasoning_content", None)
-                if reasoning:
-                    print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
-                if getattr(delta, "content", None) is not None:
-                    chunk_text = delta.content
-                    full_so_far = "".join(content_parts) + chunk_text
-
-                    # --- NEW: Manual Stop Sequence Detection ---
-                    has_stop = False
-                    # Look for tags that indicate the model is roleplaying another agent
-                    for stop_seq in ["[PLANNER]", "[CODER]", "PLANNER:", "CODER:", "[TOOLING_AGENT]"]:
-                        if stop_seq in full_so_far:
-                            has_stop = True
-                            idx = full_so_far.index(stop_seq)
-                            break
-
-                    if has_stop:
-                        # Print and save only the text BEFORE the stop sequence
-                        keep_len = idx - len("".join(content_parts))
-                        if keep_len > 0:
-                            print(chunk_text[:keep_len], end="", flush=True)
-                            content_parts.append(chunk_text[:keep_len])
-                        break  # Kill the stream immediately
-                    else:
-                        print(chunk_text, end="", flush=True)
-                        content_parts.append(chunk_text)
-            stop_spinner_once()
-            content = "".join(content_parts)
-            if not content:
-                print(f"returned empty content.{C.RESET}", file=sys.stderr)
-                return "[Agent returned empty response]"
-            duration = time.time() - t0
-            idx = content.find("TOOL OUTPUT SUMMARY:,")
-            if idx != -1:
-                content = content[idx:].strip()
-                if logger:
-                    logger.log(f"\n\n{duration:0.2f}s  -  TOOLING AGENT SUMMARY:: " + content.replace("\n", "\\n"))
-                return content
-            else:
-                print(f"TOOLING_AGENT was called but no response found in content.{C.RESET}", file=sys.stderr)
-                if logger:
-                    logger.log(f"\n\n{duration:0.2f}s  -  TOOLING AGENT DID NOT HAVE A SUMMARY")
-                return "[Agent response did not contain a TOOLING_AGENT response]"
-            
-        except openai.RateLimitError:
-            spinner.stop()
-            delay = base_delay * (2 ** attempt) + random.uniform(0, 2)
-            print(f"\n  {C.YELLOW}⚠ Rate limited. Waiting {delay:.1f}s before retry "
-                  f"(attempt {attempt + 1}/{max_retries})...{C.RESET}")
-            time.sleep(delay)
-            continue
-
-        except (
-                openai.APIConnectionError,
-                openai.APITimeoutError,
-                httpx.RemoteProtocolError,
-                httpx.ReadError,
-                httpx.ReadTimeout,
-                requests.exceptions.ChunkedEncodingError,
-                requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout,
-        ) as e:
-            spinner.stop()
-            delay = base_delay * (2 ** attempt) + random.uniform(0, 2)
-            print(
-                f"\n  {C.YELLOW}⚠ Transient network/stream error: {type(e).__name__}: {e}.{C.RESET}\n"
-                f"  {C.YELLOW}Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})...{C.RESET}"
-            )
-            time.sleep(delay)
-            continue
-
-        except Exception:
-            spinner.stop()
-            raise
+        return clean_summary
 
     raise RuntimeError(f"call_tooling_agent failed after {max_retries} retries due to transient API/connection errors.")
 
@@ -1133,6 +1065,7 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
 
         try:
             content_parts = []
+            had_reasoning = False
             first_chunk_seen = [False]
 
             def stop_spinner_once():
@@ -1167,8 +1100,12 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                     reasoning = getattr(delta, "reasoning_content", None)
                     if reasoning:
                         print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
+                        had_reasoning = True
                     if getattr(delta, "content", None) is not None:
                         chunk_text = delta.content
+                        if had_reasoning and not content_parts:
+                            print(f"\n{_RESET_COLOR}", end="", flush=True)
+                            had_reasoning = False
                         full_so_far = "".join(content_parts) + chunk_text
                         full_so_far_lower = full_so_far.lower()
                         has_stop = False
@@ -1272,8 +1209,12 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                     reasoning = getattr(delta, "reasoning_content", None)
                     if reasoning:
                         print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
+                        had_reasoning = True
                     if getattr(delta, "content", None) is not None:
                         chunk_text = delta.content
+                        if had_reasoning and not content_parts:
+                            print(f"\n{_RESET_COLOR}", end="", flush=True)
+                            had_reasoning = False
                         full_so_far = "".join(content_parts) + chunk_text
                         full_so_far_lower = full_so_far.lower()
                         has_stop = False
@@ -1318,8 +1259,12 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                     reasoning = getattr(delta, "reasoning", None) or getattr(delta, "reasoning_content", None)
                     if reasoning:
                         print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
+                        had_reasoning = True
                     if getattr(delta, "content", None) is not None:
                         chunk_text = delta.content
+                        if had_reasoning and not content_parts:
+                            print(f"\n{_RESET_COLOR}", end="", flush=True)
+                            had_reasoning = False
                         full_so_far = "".join(content_parts) + chunk_text
                         full_so_far_lower = full_so_far.lower()
                         has_stop = False
@@ -1431,16 +1376,17 @@ def run_tandem(user_task: str, max_turns: int = 8, logger: LOGGER = None) -> str
         if "TOOLING_AGENT," in response:
             tool_response = call_tooling_agent(goals, logger)
             shared_history.append(("[TOOLING_AGENT]", tool_response))
-            print_text = response + f"\n\n[TOOLING_AGENT]\n{tool_response}"
-
+            # The agent's own text was already streamed live. Just print the tool result.
+            print()
+            color = C.CYAN if agent_name == "PLANNER" else C.MAGENTA
+            label = f"{color}{C.BOLD}[TOOLING_AGENT]{C.RESET}"
+            print(f"   {label}")
+            for line in tool_response.strip().splitlines():
+                print(f"      {line}")
+            last_output = response + f"\n\n[TOOLING_AGENT]\n{tool_response}"
         else:
-            print_text = response
-
-        
-        print()
-        print_response(agent_name, print_text)
-
-        last_output = print_text
+            # No tooling call — agent text was already streamed, nothing extra to show.
+            last_output = response
 
         if "DONE:" in response:
             print_done(agent_name, time.time() - session_start, turn)
@@ -1457,7 +1403,9 @@ def run_tandem(user_task: str, max_turns: int = 8, logger: LOGGER = None) -> str
 
 print("Starting!")
 print(f"Prompt is: {task}")
+logger = None
 if log:
+    os.makedirs("logs", exist_ok=True)
     logger = LOGGER(f"logs/log-{time.ctime(time.time()).replace(' ', '_').replace(':', '-')}.txt")
     logger.log(f"Session started.")
     logger.log(f"Prompt for this session is: {task}")
@@ -1466,5 +1414,5 @@ if log:
 run_tandem(
     user_task=task,
     max_turns=max_turns,
-    logger=logger if log else None
+    logger=logger
 )
