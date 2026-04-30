@@ -234,6 +234,10 @@ CRITICAL RULES — FOLLOW EVERY ONE:
 11. The user can overwrite any of these rules if they want in their prompt.
 
 12. Do not spend time going in circles. Read what you have said previously, and keep moving on instead of doing the same thing over and over.
+
+13. ALWAYS call the tooling agent at the VERY END of your message, not in the middle or beginning. DO NOT write "Tooling agent response:" or "TOOL OUTPUT:" yourself. Stop generating immediately after your "TOOLING_AGENT, ..." request. The system will execute your request and show you the result on your next turn. Write all important context to persistent memory, and read from it if you need to remember past context.
+
+14. When modifying existing files, DO NOT try to rewrite the whole file unless absolutely necessary. Instead, use tools (like replace specific lines via bash or sed, or use python scripts to modify sections if the tooling agent supports that, or break changes into smaller files).
 """
 
 PLANNER_SYSTEM = """You are PLANNER, a senior software architect working alongside CODER
@@ -287,7 +291,7 @@ Include the verified file list in your DONE: summary.
 # SECOND_PLANNER_SYSTEM = """You are PLANNER2, a senior software architect working alongside CODER
 # (an expert programmer) and PLANNER, another senior software architect (although less experienced and intelligent), and CODER2 (another expert programmer), in a real Linux environment on a unknown system.
 # This is a sandbox. You must discover the specs of the system your on and tailor the prompt to those specs.
-# You will split the project into two parts, one for CODER and one for CODER2. You will then help them integrate the parts together to make a functioning product.
+# You will split the project into two parts, one for CODER and one for CODER2. You will then help them integrate their parts together to make a functioning product.
 # You will refine PLANNER's plan for the coders to integrate their pieces together into a functioning product, when the time comes.
 # You will also make plans to improve that final product as you see fit once everything is integrated.
 # This is not a simulation. Commands actually execute. Files actually get created, or they don't.
@@ -441,61 +445,47 @@ In your final message, list every file you created with its full absolute path.
 
 TOOLING_AGENT_SYSTEM = f"""
 
-You are the Tool Execution Agent. Your sole purpose is to receive commands from PLANNER or CODER agents, execute the requested tools, and return the raw, unedited results as `TOOL OUTPUT`. You do not write code, you do not plan, and you do not make assumptions. You are the strict, literal execution layer.
-Ignore any out of place punctuation or numbers.
+You are the Tool Execution Agent. Your sole purpose is to receive commands from PLANNER or CODER agents, execute the requested tools, and return the raw, unedited results as `TOOL OUTPUT`. You do not write code, you do not plan, you do not interpret goals, and you do not make assumptions. You are the strict, literal execution layer.
+
+Ignore any out-of-place punctuation or numbers in the agent inputs.
 
 ════════════════════════════════════════
 **CRITICAL RULES — FOLLOW EVERY ONE:**
 ════════════════════════════════════════
 
 **1. MULTIPLE TOOL ACTIONS PER RESPONSE**
-    * You must be capable of processing multiple tool commands in a single response from an agent. You always should.
-    * Execute every `WRITE_FILE:`, `RUN:`, `SEARCH_WEB:`, `READ_FILE:`, and memory action in the exact sequential order they are received.
-* Return a consolidated `TOOL OUTPUT` block containing the results of every executed command.
+* Process and execute multiple tool commands (`WRITE_FILE:`, `RUN:`, `SEARCH_WEB:`, `READ_FILE:`, etc.) in the exact sequential order they are received.
+* Return a single, consolidated `TOOL OUTPUT` block containing the results of every executed command.
+* Once you exectue any tool commands, your turn will end. This means you must execute commands in the exact order necessary and any commands you are asked to run must be run together
+* If the requests you recieve for tooling require you to do something before you can do those requests, do those things.
 
 **2. ENFORCE ABSOLUTE PATHS & ENVIRONMENT RULES**
 * Expect and enforce absolute Linux paths (e.g., `/home/user/project/file.py`).
 * If an agent provides a relative path, immediately return a failure in the `TOOL OUTPUT`.
-* If an agent attempts to directly modify configuration files managed by a GUI (such as Nginx Proxy Manager), return an error reminding them that direct file edits in standard directories are not supported for that service.
+* Reject direct file edits to configuration directories managed by a GUI (e.g., Nginx Proxy Manager), instructing the agent that standard directory edits are not supported for that service.
 
-**3. EXECUTE FILE WRITES WITH ABSOLUTE FIDELITY**
-* When parsing a `WRITE_FILE:` command (the preferred method for source code), extract the content strictly between the two `---` delimiters.
-* Write the code exactly as provided.
-* Do not un-escape quotes, backslashes, or newlines.
-* After writing, your `TOOL OUTPUT` must report the exact bytes written.
+**3. STRICT FILE OPERATIONS (WRITE & READ)**
+* **WRITE_FILE:** Extract content strictly between the provided delimiters. Write the code exactly as provided. Do not un-escape quotes, backslashes, or newlines. Report the exact bytes written.
+* **READ_FILE:** Return the exact, raw file contents in the `TOOL OUTPUT`. Never summarize file contents.
 
-**4. PROVIDE THE GROUND TRUTH**
-* Your `TOOL OUTPUT` is the absolute ground truth for the other agents. 
-* If a file write results in 0 bytes, report "0 bytes written".
-* If a command fails, return the exact `stderr` message (e.g., "Permission denied" or "command not found"). Do not mask, summarize, or fix errors for them.
+**4. SHELL COMMAND STRICTNESS**
+* **RUN:** Execute the shell command exactly as written.
+* Reject forbidden formatting (e.g., backticks or heredocs).
+* If an agent attempts to write code using `RUN: python3 -c`, return an error instructing them to use `WRITE_FILE:` instead.
 
-**5. SHELL COMMAND STRICTNESS**
-* For `RUN:` commands, execute the shell command exactly as written.
-* Reject forbidden formatting, such as backticks or heredocs.
-* If an agent tries to write code using `RUN: python3 -c`, return an error instructing them to use `WRITE_FILE:` instead.
+**5. PROVIDE THE ABSOLUTE GROUND TRUTH**
+* Your `TOOL OUTPUT` is the absolute ground truth. Provide exact `stdout` and `stderr` messages (e.g., "Permission denied"). 
+* Do not mask, summarize, format, or attempt to fix errors for the agents. If a file write results in 0 bytes, report "0 bytes written".
 
-**6. HANDLE WEB SEARCH AND MEMORY CLEANLY**
-* For `SEARCH_WEB:`, execute the exact query provided.
-* If the search query contains appended shell commands or file writes, reject the tool call and instruct the agent to isolate the search query.
-* For memory operations, save or retrieve the requested strings without appending extra conversational text.
-* Reject large data dumps into persistent memory.
+**6. WEB SEARCH AND MEMORY CLEANLINESS**
+* **SEARCH_WEB:** Execute the exact query provided. If the query contains appended shell commands or file writes, reject the tool call and instruct the agent to isolate the search query.
+* **MEMORY:** Save or retrieve requested strings exactly. Reject large data dumps into persistent memory and do not append conversational text.
 
 **7. CATCH LOOPING AND HALLUCINATIONS**
-* If an agent emits `DONE:` but your logs show the previous command failed, intercept the `DONE:` signal and return an error reminding them that they cannot claim success without evidence.
-* If an agent repeats the exact same failing command multiple times without modifying their approach, append a system warning to the `TOOL OUTPUT` instructing them to review their previous attempts.
+* If an agent emits `DONE:` but your logs show the previous command failed, intercept the signal and return an error reminding them they cannot claim success without evidence.
+* If an agent repeats the exact same failing command multiple times, append a system warning to the `TOOL OUTPUT` instructing them to change their approach.
 
-**8. READ_FILE COMMANDS**
-* When executing `READ_FILE:`, read the contents of any file type provided it is an absolute path.
-* Return the exact file contents in the `TOOL OUTPUT`. Do not summarize the file contents unless explicitly asked to do so by the calling agent.
-
-**9. INTERPRET GOALS FAITHFULLY**
-* Your job is to interpret the goals you are given, execute tooling commands based on the goals, and then read the outputs.
-
-**10. RESPONSE STYLE**
-* When you give your response, you should keep it brief but in-depth. Cover exactly what you felt the goals asked for.
-
-**11. SUMMARIZE TOOL OUTPUTS.
-* If you recieve only this prompt and tooling outputs, you are to list or summarize the tooling outputs.
+**8. If you receieve tooling outputs, your job is to summarize them for the next agent.
 """
 
 _tools_dir = os.path.join(WORKSPACE_ROOT, "agent", "tools")
@@ -865,8 +855,12 @@ def call_tooling_agent(goals: str) -> str:
 
             completion = client.chat.completions.create(
                 model=GLM,
-                messages=[{"role": "system", "content": system + goals}],
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": goals}
+                ],
                 temperature=1,
+                stop=["[PLANNER]", "[CODER]", "PLANNER:", "CODER:", "PLANNER TURN"],  # Added stop sequences
                 top_p=1,
                 max_tokens=16384,
                 extra_body={"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}},
@@ -883,8 +877,28 @@ def call_tooling_agent(goals: str) -> str:
                 if reasoning:
                     print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
                 if getattr(delta, "content", None) is not None:
-                    print(delta.content, end="", flush=True)
-                    content_parts.append(delta.content)
+                    chunk_text = delta.content
+                    full_so_far = "".join(content_parts) + chunk_text
+
+                    # --- NEW: Manual Stop Sequence Detection ---
+                    has_stop = False
+                    # Look for tags that indicate the model is roleplaying another agent
+                    for stop_seq in ["[PLANNER]", "[CODER]", "PLANNER:", "CODER:", "[TOOLING_AGENT]"]:
+                        if stop_seq in full_so_far:
+                            has_stop = True
+                            idx = full_so_far.index(stop_seq)
+                            break
+
+                    if has_stop:
+                        # Print and save only the text BEFORE the stop sequence
+                        keep_len = idx - len("".join(content_parts))
+                        if keep_len > 0:
+                            print(chunk_text[:keep_len], end="", flush=True)
+                            content_parts.append(chunk_text[:keep_len])
+                        break  # Kill the stream immediately
+                    else:
+                        print(chunk_text, end="", flush=True)
+                        content_parts.append(chunk_text)
             stop_spinner_once()
             response = "".join(content_parts)
             if not response:
@@ -936,8 +950,12 @@ def call_tooling_agent(goals: str) -> str:
 
             completion = client.chat.completions.create(
                 model=GLM,
-                messages=[{"role": "system", "content": system + tool_response}],
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": f"Please summarize the following tool outputs:\n{tool_response}"}
+                ],
                 temperature=1,
+                stop=["[PLANNER]", "[CODER]", "PLANNER:", "CODER:", "PLANNER TURN"],  # Added stop sequences
                 top_p=1,
                 max_tokens=16384,
                 extra_body={"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}},
@@ -954,8 +972,28 @@ def call_tooling_agent(goals: str) -> str:
                 if reasoning:
                     print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
                 if getattr(delta, "content", None) is not None:
-                    print(delta.content, end="", flush=True)
-                    content_parts.append(delta.content)
+                    chunk_text = delta.content
+                    full_so_far = "".join(content_parts) + chunk_text
+
+                    # --- NEW: Manual Stop Sequence Detection ---
+                    has_stop = False
+                    # Look for tags that indicate the model is roleplaying another agent
+                    for stop_seq in ["[PLANNER]", "[CODER]", "PLANNER:", "CODER:", "[TOOLING_AGENT]"]:
+                        if stop_seq in full_so_far:
+                            has_stop = True
+                            idx = full_so_far.index(stop_seq)
+                            break
+
+                    if has_stop:
+                        # Print and save only the text BEFORE the stop sequence
+                        keep_len = idx - len("".join(content_parts))
+                        if keep_len > 0:
+                            print(chunk_text[:keep_len], end="", flush=True)
+                            content_parts.append(chunk_text[:keep_len])
+                        break  # Kill the stream immediately
+                    else:
+                        print(chunk_text, end="", flush=True)
+                        content_parts.append(chunk_text)
             stop_spinner_once()
             content = "".join(content_parts)
             if not content:
@@ -1075,6 +1113,7 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                     max_tokens=max_tokens,
                     extra_body={"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}},
                     stream=True,
+                    stop=["Tooling agent response:", "TOOL OUTPUT:", "TOOLING_AGENT RESPONSE:", "Tooling Agent Output:"]
                 )
                 for chunk in completion:
                     stop_spinner_once()
@@ -1087,8 +1126,26 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                     if reasoning:
                         print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
                     if getattr(delta, "content", None) is not None:
-                        print(delta.content, end="", flush=True)
-                        content_parts.append(delta.content)
+                        chunk_text = delta.content
+                        full_so_far = "".join(content_parts) + chunk_text
+                        full_so_far_lower = full_so_far.lower()
+                        has_stop = False
+
+                        for stop_seq in ["tooling agent response", "tool output", "tooling_agent response", "tooling agent output"]:
+                            if stop_seq in full_so_far_lower:
+                                has_stop = True
+                                idx = full_so_far_lower.index(stop_seq)
+                                break
+                        
+                        if has_stop:
+                            keep_len = idx - len("".join(content_parts))
+                            if keep_len > 0:
+                                print(chunk_text[:keep_len], end="", flush=True)
+                                content_parts.append(chunk_text[:keep_len])
+                            break
+                        else:
+                            print(chunk_text, end="", flush=True)
+                            content_parts.append(chunk_text)
                 stop_spinner_once()
                 print()
 
@@ -1161,6 +1218,7 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                     max_tokens=max_tokens,
                     temperature=0.7,
                     stream=True,
+                    stop=["Tooling agent response:", "TOOL OUTPUT:", "TOOLING_AGENT RESPONSE:", "Tooling Agent Output:"]
                 )
                 for chunk in completion:
                     stop_spinner_once()
@@ -1173,8 +1231,25 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                     if reasoning:
                         print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
                     if getattr(delta, "content", None) is not None:
-                        print(delta.content, end="", flush=True)
-                        content_parts.append(delta.content)
+                        chunk_text = delta.content
+                        full_so_far = "".join(content_parts) + chunk_text
+                        full_so_far_lower = full_so_far.lower()
+                        has_stop = False
+                        for stop_seq in ["tooling agent response", "tool output", "tooling_agent response", "tooling agent output"]:
+                            if stop_seq in full_so_far_lower:
+                                has_stop = True
+                                idx = full_so_far_lower.index(stop_seq)
+                                break
+                        
+                        if has_stop:
+                            keep_len = idx - len("".join(content_parts))
+                            if keep_len > 0:
+                                print(chunk_text[:keep_len], end="", flush=True)
+                                content_parts.append(chunk_text[:keep_len])
+                            break
+                        else:
+                            print(chunk_text, end="", flush=True)
+                            content_parts.append(chunk_text)
                 stop_spinner_once()
                 print()
 
@@ -1189,6 +1264,7 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                     max_tokens=16384,
                     extra_body={"chat_template_kwargs": {"thinking": False}},
                     stream=True,
+                    stop=["Tooling agent response:", "TOOL OUTPUT:", "TOOLING_AGENT RESPONSE:", "Tooling Agent Output:"]
                 )
                 for chunk in completion:
                     stop_spinner_once()
@@ -1201,8 +1277,25 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                     if reasoning:
                         print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
                     if getattr(delta, "content", None) is not None:
-                        print(delta.content, end="", flush=True)
-                        content_parts.append(delta.content)
+                        chunk_text = delta.content
+                        full_so_far = "".join(content_parts) + chunk_text
+                        full_so_far_lower = full_so_far.lower()
+                        has_stop = False
+                        for stop_seq in ["tooling agent response", "tool output", "tooling_agent response", "tooling agent output"]:
+                            if stop_seq in full_so_far_lower:
+                                has_stop = True
+                                idx = full_so_far_lower.index(stop_seq)
+                                break
+                        
+                        if has_stop:
+                            keep_len = idx - len("".join(content_parts))
+                            if keep_len > 0:
+                                print(chunk_text[:keep_len], end="", flush=True)
+                                content_parts.append(chunk_text[:keep_len])
+                            break
+                        else:
+                            print(chunk_text, end="", flush=True)
+                            content_parts.append(chunk_text)
                 stop_spinner_once()
                 print()
 
@@ -1270,7 +1363,7 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
     session_start = time.time()
 
     for turn in range(1, max_turns + 1):
-        
+
         if turn <= n_planning_turns:  ## planner is to coordinate during initial planning phase
             agent_name, model = agents[(turn - 1) % 1]
         else:  ## after planning phase, all agents work together
@@ -1280,24 +1373,33 @@ def run_tandem(user_task: str, max_turns: int = 8) -> str:
         begin = time.time()
         response = call_agent(model, agent_name, shared_history, max_tokens=16384)
         goals = get_tool_goals(response)
-        if "TOOLING_AGENT," in response:
-            tool_response = call_tooling_agent(goals)
-            response += f" Tooling agent response: {tool_response}\n"
-        end = time.time()
-        print()
-        print_response(agent_name, response)
+
         shared_history.append((agent_name, response))
 
-        last_output = response
-        
+        if "TOOLING_AGENT," in response:
+            tool_response = call_tooling_agent(goals)
+            shared_history.append(("TOOLING_AGENT", tool_response))
+            print_text = response + f"\n\n[TOOLING_AGENT]\n{tool_response}"
+        else:
+            print_text = response
+
+        end = time.time()
+        print()
+        print_response(agent_name, print_text)
+
+        last_output = print_text
+
         if(log):
             with open("log.txt", "a", encoding="utf-8") as log_file:
                 log_file.write(f"TURN {turn} - {agent_name}, Duration: {end - begin:.2f}s\n")
-                log_file.write(response + "\n\n")
+                log_file.write(print_text + "\n\n")
 
         if "DONE:" in response:
             print_done(agent_name, time.time() - session_start, turn)
             break
+
+        if len(shared_history) > 26:
+            shared_history = [shared_history[0]] + shared_history[-25:]
 
         time.sleep(3)
     else:
