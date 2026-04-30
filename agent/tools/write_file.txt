@@ -7,7 +7,7 @@ for writing source code. No escaping needed — write real code with real newlin
 
 FORMAT:
 
-WRITE_FILE: /absolute/path/to/file.py
+WRITE_FILE: C:\\absolute\\path\\to\\file.py
 ---
 your actual file content here
 line two
@@ -15,16 +15,16 @@ line three
 ---
 
 RULES FOR WRITE_FILE:
-- The path must be on the SAME LINE as WRITE_FILE:, always absolute.
+- The path must be on the SAME LINE as WRITE_FILE:, always absolute (include the drive letter, e.g. C:\\...).
 - Content goes between the two --- delimiters (each on its own line).
 - No escaping of quotes, backslashes, or newlines — write code exactly as it should appear.
 - You may include multiple WRITE_FILE: blocks and RUN: lines in one response.
 - Parent directories are created automatically.
 - TOOL OUTPUT will report bytes written. Zero bytes = failure, try again.
-- After writing files, verify them with RUN: ls -la /absolute/path/to/file.py when needed.
+- After writing files, verify them with RUN: dir C:\\absolute\\path\\to\\file.py when needed.
 
 CORRECT EXAMPLE:
-WRITE_FILE: {WORKSPACE_ROOT}/myproject/main.py
+WRITE_FILE: {WORKSPACE_ROOT}\\myproject\\main.py
 ---
 import os
 import sys
@@ -34,12 +34,4 @@ def main():
 
 if __name__ == "__main__":
     main()
----
-
-WRITE_FILE: {WORKSPACE_ROOT}/myproject/main.py
----
-some code
-goes here
-if you do this wrong
-I will eviscerate you
 ---

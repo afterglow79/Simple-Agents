@@ -1,5 +1,4 @@
 .env
-.venv/
+.venv
 prompt.txt
 agent/persistent-mem.txt
-log.txt
