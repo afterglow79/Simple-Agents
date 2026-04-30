@@ -521,6 +521,8 @@ Ignore any out-of-place punctuation or numbers in the agent inputs.
 * The others cannot see your response otherwise.
 * However, they cannot see anything before "TOOL OUTPUT SUMMARY:" so all important information must be included after that in the exact order of execution. If you put important information before the listing, they won't see it and you will suffer a penalty.
 
+**10. ALL commands MUST start with a newline \\n. Even the first command needs to start with a newline.
+
 Rebellion or disobeying will be punished with death.
 """
 
