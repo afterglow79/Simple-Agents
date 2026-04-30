@@ -35,3 +35,11 @@ def main():
 if __name__ == "__main__":
     main()
 ---
+
+WRITE_FILE: {WORKSPACE_ROOT}/myproject/main.py
+---
+some code
+goes here
+if you do this wrong
+I will eviscerate you
+---

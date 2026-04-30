@@ -627,7 +627,7 @@ def _parse_search_results(results: list) -> str:
 
     return "\n\n---\n\n".join(extracted_pages) if extracted_pages else "No results found."
 
-
+## tooling agent has a stroke here for some reason
 def write_file_to_disk(path: str, content: str) -> str:
     """Write *content* to *path*, creating parent directories as needed.
 
