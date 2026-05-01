@@ -1,9 +1,8 @@
-# Simple-Agents (Windows Fork)
-
-> **⚠️ This is a Windows-only fork.** All agents operate inside a real `cmd.exe` environment using Windows paths and Windows commands. If you are on Linux/macOS, see the [original repository](https://github.com/afterglow79/Simple-Agents).
-
+# Simple-Agents
 A multi-agent AI framework that runs four specialized AI agents in tandem using the [NVIDIA build API](https://build.nvidia.com/). Two planners and two coders collaborate in a shared Windows environment to plan, write, verify, and deliver working software.
 
+
+# This will run on both Windows and Linux.
 ---
 
 ## How it works
