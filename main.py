@@ -37,7 +37,7 @@ parser.add_argument("--task", type=str, help="Prompt. If this is a path to a tex
 parser.add_argument("--init_planning_turns", type=int, default = 0, help="Number of initial turns to give to the planner alone before the coder can speak.")
 parser.add_argument("--can_use_web_search", type=bool, default=False, help="Allow the agent to use web search when needed to complete the task. If False, the agent must rely on its existing knowledge and tools.")
 parser.add_argument("--log", type=bool, default=True, help="Enable logging")
-parser.add_argument("--max_lines", type=int, default=200, help="The maximum number of lines allowed in a single source code file before it must be split into multiple files.")
+parser.add_argument("--max_lines", type=int, default=300, help="The maximum number of lines allowed in a single source code file before it must be split into multiple files.")
 
 args = parser.parse_args()
 
