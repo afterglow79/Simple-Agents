@@ -267,7 +267,7 @@ CRITICAL RULES — FOLLOW EVERY ONE:
 
 14. When modifying existing files, DO NOT try to rewrite the whole file unless absolutely necessary. Instead, use tools (like replace specific lines via bash or sed, or use python scripts to modify sections if the tooling agent supports that, or break changes into smaller files).
 
-15. NEVER write a single source file larger than ~200 lines.
+15. NEVER write a single source file larger than ~500 lines.
     If a file would exceed this, split it into logical modules and write each one separately.
     Examples:
       - data.js  →  data_characters.js, data_enemies.js, data_items.js, data_skills.js, data_events.js
@@ -277,7 +277,7 @@ CRITICAL RULES — FOLLOW EVERY ONE:
     (e.g. window.GameData_Characters, window.GameData_Enemies) then merge in a
     loader script: Object.assign(window.GameData, window.GameData_Characters, ...).
     Make sure <script> tags in HTML load modules in dependency order before the loader.
-    Splitting is MANDATORY when a file would exceed 200 lines — it prevents silent
+    Splitting is MANDATORY when a file would exceed 500 lines — it prevents silent
     write truncation and makes each file easy to verify with cat.
 """
 
