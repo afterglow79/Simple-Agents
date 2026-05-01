@@ -36,7 +36,7 @@ parser.add_argument("--max_turns", type=int, default=25)
 parser.add_argument("--task", type=str)
 parser.add_argument("--init_planning_turns", type=int, default = 0)
 parser.add_argument("--can_use_web_search", type=bool, default=False)
-parser.add_argument("--log", type=bool, default=False)
+parser.add_argument("--log", type=bool, default=True)
 
 args = parser.parse_args()
 
