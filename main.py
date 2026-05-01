@@ -46,6 +46,13 @@ n_planning_turns = args.init_planning_turns
 can_search = args.can_use_web_search
 log = args.log
 
+operatingSystem = sys.platform
+windows = False
+if(operatingSystem == "linux"):
+    windows = False
+elif(operatingSystem == "win32" or os == "win64"):
+    windows = True
+
 WORKSPACE_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 if task and os.path.exists(task):  ## allow user to pass through files for longer or more complex tasks.
@@ -226,7 +233,7 @@ CRITICAL RULES — FOLLOW EVERY ONE:
 
 4. VERIFY EVERY FILE AFTER WRITING.
    After every WRITE_FILE: block, your next action must be:
-   RUN: ls -la /absolute/path/file.py
+   RUN: ls - la /absolute/path/to/file.py
    The output must show a non-zero file size. Zero bytes = write failed = try again.
 
 5. READ TOOL OUTPUT AND REACT TO IT — THIS IS THE MOST IMPORTANT RULE.
@@ -487,7 +494,7 @@ In your final message, list every file you created with its full absolute path.
 TOOLING_AGENT_SYSTEM = f"""
 
 You are the Tool Execution Agent. Your sole purpose is to receive commands from another user, execute the requested tools, and return the raw, unedited results as `TOOL OUTPUT`. You do not write code, you do not plan, you do not interpret goals, and you do not make assumptions. You are the strict, literal execution layer.
-
+You are on Linux
 Ignore any out-of-place punctuation or numbers in the agent inputs.
 
 ════════════════════════════════════════
@@ -551,6 +558,32 @@ if os.path.isdir(_tools_dir):
             except Exception:
                 continue
 
+systems = [PLANNER_SYSTEM, CODER_SYSTEM, TOOLING_AGENT_SYSTEM, TOOL_INSTRUCTIONS]
+
+
+if windows:
+    for i, system in enumerate(systems):
+        system = system.replace("ls -la /absolute/path/to/file", "dir \\absolute\\path\\to\\file")
+        system = system.replace("ls", "dir")
+        system = system.replace("cat", "type")
+        system = system.replace("-rw-rw-r-- 1 user user 0 Apr 26 12:00 file.py", "04/26/2026  12:00 PM                 0 file.py")
+        system = system.replace("-rw-rw-r-- 1 user user 1826 Apr 26 12:00 file.py", "04/26/2026  12:00 PM                 1826 file.py")
+        system = system.replace("pwd", "cd")
+        system = system.replace("Linux", "Windows")
+        system = system.replace("LINUX", "WINDOWS")
+        system = system.replace("linux", "windows")
+        system = system.replace("cat > file.py << EOF", """
+(
+echo # contents
+echo print("Hello world")
+) > file.py
+)
+"""
+
+                       )
+        system = system.replace("/", "\\")
+        system += ("NEVER use any Linux commands. If you do, they will not work. You are not on Linux, you are on Windows.")
+        systems[i] = system
 # ── Command execution ─────────────────────────────────────────────────────────
 
 BLOCKED = ["rm -rf", "mkfs", "dd if=", "shutdown", "reboot", "> /dev/sd"]
@@ -958,7 +991,6 @@ def call_tooling_agent(goals: str, logger: LOGGER=None) -> str:
                         had_reasoning = False
                     full_so_far = "".join(content_parts) + chunk_text
 
-                    # --- NEW: Manual Stop Sequence Detection ---
                     has_stop = False
                     # Look for tags that indicate the model is roleplaying another agent
                     for stop_seq in ["[PLANNER]", "[CODER]", "PLANNER:", "CODER:", "[TOOLING_AGENT]"]:
@@ -1444,7 +1476,9 @@ if log:
     os.makedirs("logs", exist_ok=True)
     logger = LOGGER(f"logs/log-{time.ctime(time.time()).replace(' ', '_').replace(':', '-')}.txt")
     logger.log(f"Session started.")
+    logger.log(f"User is on {"Windows" if windows else "Linux"}.")
     logger.log(f"Prompt for this session is: {task}")
+    logger.log(f"Agent systems are: \n --------- \n {"\n --------- \n".join(systems)} \n --------- \n")
 
 
 run_tandem(
