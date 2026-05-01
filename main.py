@@ -32,11 +32,12 @@ except ImportError:
 
 parser = argparse.ArgumentParser(description="Tandem agentic AI operations.")
 
-parser.add_argument("--max_turns", type=int, default=25)
-parser.add_argument("--task", type=str)
-parser.add_argument("--init_planning_turns", type=int, default = 0)
-parser.add_argument("--can_use_web_search", type=bool, default=False)
-parser.add_argument("--log", type=bool, default=True)
+parser.add_argument("--max_turns", type=int, default=25, help="Maximum number of turns for the session. A turn consists of one message from the planner or one message from the coder.")
+parser.add_argument("--task", type=str, help="Prompt. If this is a path to a text file, the task will be read from that file instead.")
+parser.add_argument("--init_planning_turns", type=int, default = 0, help="Number of initial turns to give to the planner alone before the coder can speak.")
+parser.add_argument("--can_use_web_search", type=bool, default=False, help="Allow the agent to use web search when needed to complete the task. If False, the agent must rely on its existing knowledge and tools.")
+parser.add_argument("--log", type=bool, default=True, help="Enable logging")
+parser.add_argument("--max_lines", type=int, default=200, help="The maximum number of lines allowed in a single source code file before it must be split into multiple files.")
 
 args = parser.parse_args()
 
@@ -45,6 +46,7 @@ task = args.task
 n_planning_turns = args.init_planning_turns
 can_search = args.can_use_web_search
 log = args.log
+max_lines = args.max_lines
 
 operatingSystem = sys.platform
 windows = False
@@ -274,7 +276,7 @@ CRITICAL RULES — FOLLOW EVERY ONE:
 
 14. When modifying existing files, DO NOT try to rewrite the whole file unless absolutely necessary. Instead, use tools (like replace specific lines via bash or sed, or use python scripts to modify sections if the tooling agent supports that, or break changes into smaller files).
 
-15. NEVER write a single source file larger than ~200 lines.
+15. NEVER write a single source file larger than ~{max_lines} lines.
     If a file would exceed this, split it into logical modules and write each one separately.
     Examples:
       - data.js  →  data_characters.js, data_enemies.js, data_items.js, data_skills.js, data_events.js
@@ -284,7 +286,7 @@ CRITICAL RULES — FOLLOW EVERY ONE:
     (e.g. window.GameData_Characters, window.GameData_Enemies) then merge in a
     loader script: Object.assign(window.GameData, window.GameData_Characters, ...).
     Make sure <script> tags in HTML load modules in dependency order before the loader.
-    Splitting is MANDATORY when a file would exceed 200 lines — it prevents silent
+    Splitting is MANDATORY when a file would exceed {max_lines} lines — it prevents silent
     write truncation and makes each file easy to verify with cat.
 """
 
@@ -541,6 +543,7 @@ Ignore any out-of-place punctuation or numbers in the agent inputs.
 * The others cannot see your response otherwise.
 * However, they cannot see anything before "TOOL OUTPUT SUMMARY:" so all important information must be included after that in the exact order of execution. If you put important information before the listing, they won't see it and you will suffer a penalty.
 
+**10. At the end of every turn, you should write what is done to persistent memory, even if not requested by the user. Keep the summary a reasonable length though. You don't need to output full tool response or fully what you did, just a summary of the important bits.
 Rebellion or disobeying will be punished with death.
 """
 
@@ -588,6 +591,7 @@ echo print("Hello world")
 
 BLOCKED = ["rm -rf", "mkfs", "dd if=", "shutdown", "reboot", "> /dev/sd"]
 
+TOOLING_AGENT_SYSTEM += "\n\n" + f"BLOCKED COMMANDS: {', '.join(BLOCKED)}. If you try to run these, they will not work."
 
 def run_command(command: str) -> str:
     blocked_pattern = next((pattern for pattern in BLOCKED if pattern in command), None)
@@ -603,6 +607,8 @@ def run_command(command: str) -> str:
         )
         stdout = (result.stdout or "").strip()
         stderr = (result.stderr or "").strip()
+        if log:
+            logger.log(f"Executed command: {command}\nSTDOUT: {stdout}\nSTDERR: {stderr}")
         if stdout and stderr:
             return f"{stdout}\n[stderr]\n{stderr}"
         if stdout:
@@ -619,6 +625,8 @@ def write_to_persistent_memory(content: str):
     mem_path = os.path.join(WORKSPACE_ROOT, "agent", "persistent-mem.txt")
     with open(mem_path, "a", encoding="utf-8") as f:
         f.write(content + "\n\n")
+    if log:
+        logger.log(f"Wrote to persistent memory: {content}")
 
 def read_persistent_memory() -> str:
     mem_path = os.path.join(WORKSPACE_ROOT, "agent", "persistent-mem.txt")
@@ -626,12 +634,16 @@ def read_persistent_memory() -> str:
         return ""
     with open(mem_path, "r", encoding="utf-8") as f:
         return f.read()
+    if log:
+        logger.log(f"Read from persistent memory.")
 
 def read_file(path: str) -> str:
     if not os.path.exists(path):
         return f"File not found: {path}"
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
+    if log:
+        logger.log(f"Read file: {path}")
 
 def get_specs() -> str:
     result = ""
@@ -644,6 +656,10 @@ def get_specs() -> str:
         timeout=60
     )
 
+    if log:
+        logger.log(f"Retrieved system specs: {result}")
+
+
     return result
 
 def search_web(query: str) -> str:
@@ -652,6 +668,8 @@ def search_web(query: str) -> str:
     results = []
     for url in _googlesearch(query, num=10, stop=10, pause=2):
         results.append(url)
+    if log:
+        logger.log(f"Executed web search: {query}\nResults: {results}")
     return _parse_search_results(results)
 
 def _parse_search_results(results: list) -> str:
@@ -706,7 +724,8 @@ def _parse_search_results(results: list) -> str:
             extracted_pages.append("\n".join(page_lines))
         except Exception as e:
             extracted_pages.append(f"URL: {url}\nERROR: {e}")
-
+    if log:
+        logger.log(f"Parsed search results into summaries.")
     return "\n\n---\n\n".join(extracted_pages) if extracted_pages else "No results found."
 
 ## tooling agent has a stroke here for some reason
@@ -722,8 +741,12 @@ def write_file_to_disk(path: str, content: str) -> str:
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
         size = os.path.getsize(path)
+        if log:
+            logger.log(f"Wrote file to disk: {path} ({size} bytes). Content: {content}")    
         return f"Wrote {size} bytes to {path}"
     except Exception as e:
+        if log:
+            logger.log(f"ERROR writing file to disk: {path}. Exception: {e}")
         return f"ERROR writing {path}: {e}"
 
 
@@ -1428,6 +1451,7 @@ def run_tandem(user_task: str, max_turns: int = 8, logger: LOGGER = None) -> str
             f"PLANNER : begin now. Call TOOLING_AGENT to confirm the environment, "
             f"then list every file you need CODER to create with full absolute paths. "
             f"Use TOOLING_AGENT for every file read, file write, shell command, memory action, and web lookup."
+            f"Read from persistent memory before you do anything else."
         ))
     ]
 

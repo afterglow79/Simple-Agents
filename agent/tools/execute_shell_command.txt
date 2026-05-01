@@ -6,7 +6,6 @@ Use " RUN:" (include the space) for everything else: creating directories, listi
 reading file contents, etc. Do NOT use RUN: + python3 -c to write code files —
 use WRITE_FILE: instead.
 
-Please keep RUN commands per turn to a minimum, but feel free to chain things together with &&.
 
 FORMAT — emit this on its own line, no other text on that line:
 
@@ -24,3 +23,4 @@ WRONG — DO NOT DO THESE:
    RUN: cat > file.py << EOF     <- heredocs DO NOT WORK, never use them
    RUN: mkdir foo                <- relative paths forbidden, always absolute
    RUN: ls /tmp</arg_value>      <- never include XML/tool-call tags
+   RUN: mkdir {engine,world,aircraft,planes,weapons,roguelike,story,ui,audio,data,utils} <- chaining together directories with brackets does not work
