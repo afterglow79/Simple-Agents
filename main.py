@@ -48,9 +48,9 @@ log = args.log
 
 operatingSystem = sys.platform
 windows = False
-if(operatingSystem == "linux"):
+if(operatingSystem == "linux" or operatingSystem == "darwin"):
     windows = False
-elif(operatingSystem == "win32" or os == "win64"):
+elif(operatingSystem.startswith("win")):
     windows = True
 
 WORKSPACE_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -952,7 +952,7 @@ def call_tooling_agent(goals: str, logger: LOGGER=None) -> str:
         try:
             content_parts = []
             had_reasoning = False
-            first_chunk_seen = [False]
+            first_chunk_seen = [False] ## why a list?
 
             def stop_spinner_once():
                 if not first_chunk_seen[0]:
@@ -1047,6 +1047,11 @@ def call_tooling_agent(goals: str, logger: LOGGER=None) -> str:
                 f"\n  {C.YELLOW}⚠ Transient network/stream error: {type(e).__name__}: {e}.{C.RESET}\n"
                 f"  {C.YELLOW}Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})...{C.RESET}"
             )
+            if log:
+                logger.log(
+                    f"\n   Transient network/stream error: {type(e).__name__}: {e}.\n"
+                    f"  Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})..."
+                )
             time.sleep(delay)
             continue
 
@@ -1073,7 +1078,8 @@ def call_tooling_agent(goals: str, logger: LOGGER=None) -> str:
             logger.log(f"\n\n{duration:0.2f}s  -  TOOLING AGENT SUMMARY: " + clean_summary.replace("\n", "\\n"))
 
         return clean_summary
-
+    if log:
+        logger.log(f"ERROR: call_tooling_agent failed after {max_retries} retries due to transient API/connection errors.")
     raise RuntimeError(f"call_tooling_agent failed after {max_retries} retries due to transient API/connection errors.")
 
 
@@ -1093,10 +1099,12 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
         # "CODER2": ("GLM-5.1", SECOND_CODER_SYSTEM),
     }
     if agent_name not in agent_config:
+        if log:
+            logger.log(f"ERROR: Unknown agent name '{agent_name}'. Expected one of: {list(agent_config.keys())}")
         raise ValueError(f"Unknown agent name: '{agent_name}'. Expected one of: {list(agent_config.keys())}")
     model_short, system = agent_config[agent_name]
 
-    msg_list = [{"role": "system", "content": system}]
+    msg_list = [{"role": "system", "content": system}] ## does this add the system every time?
 
     for speaker, content in shared_history:
         # Assign roles: The current agent sees its own history as "assistant", everyone else is "user"
@@ -1317,6 +1325,7 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                     stream=True,
                     stop=["Tooling agent response:", "TOOL OUTPUT:", "TOOLING_AGENT RESPONSE:", "Tooling Agent Output:"]
                 )
+
                 for chunk in completion:
                     stop_spinner_once()
                     if not getattr(chunk, "choices", None) or len(chunk.choices) == 0:
@@ -1355,6 +1364,8 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
                 print()
 
             else:
+                if log:
+                    logger.log(f"ERROR: Unsupported model_short '{model_short}' for agent '{agent_name}'.")
                 raise ValueError(f"Unsupported model_short '{model_short}' for agent '{agent_name}'.")
 
             content = "".join(content_parts)
@@ -1374,6 +1385,8 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
             delay = base_delay * (2 ** attempt) + random.uniform(0, 2)
             print(f"\n  {C.YELLOW}⚠ Rate limited. Waiting {delay:.1f}s before retry "
                   f"(attempt {attempt + 1}/{max_retries})...{C.RESET}")
+            if log:
+                logger.log(f"\n  Rate limited. Waiting {delay:.1f}s before retry (attempt {attempt + 1}/{max_retries})...")
             time.sleep(delay)
 
         except (
@@ -1391,7 +1404,10 @@ def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=163
             print(
                 f"\n  {C.YELLOW}⚠ Transient network/stream error: {type(e).__name__}: {e}.{C.RESET}\n"
                 f"  {C.YELLOW}Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})...{C.RESET}"
-            )
+                )
+            if log:
+                logger.log(f"\n  Transient network/stream error: {type(e).__name__}: {e}. Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})...")
+            
             time.sleep(delay)
 
         except Exception as e:
@@ -1458,6 +1474,7 @@ def run_tandem(user_task: str, max_turns: int = 8, logger: LOGGER = None) -> str
 
         if "DONE:" in response:
             print_done(agent_name, time.time() - session_start, turn)
+            if log: logger.log(f"Session completed with DONE signal from {agent_name} at turn {turn}.")
             break
 
         if len(shared_history) > 26:
@@ -1466,6 +1483,8 @@ def run_tandem(user_task: str, max_turns: int = 8, logger: LOGGER = None) -> str
         time.sleep(3)
     else:
         print(f"\n{C.YELLOW}  Reached max turns ({max_turns}) without DONE signal.{C.RESET}\n")
+        if log:
+            logger.log(f"Reached max turns ({max_turns}) without DONE signal.")
 
     return last_output
 
@@ -1474,11 +1493,11 @@ print(f"Prompt is: {task}")
 logger = None
 if log:
     os.makedirs("logs", exist_ok=True)
-    logger = LOGGER(f"logs/log-{time.ctime(time.time()).replace(' ', '_').replace(':', '-')}.txt")
+    logger = LOGGER(f"logs/Log-{time.ctime(time.time()).replace(' ', '_').replace(':', '-')}.txt")
     logger.log(f"Session started.")
     logger.log(f"User is on {"Windows" if windows else "Linux"}.")
     logger.log(f"Prompt for this session is: {task}")
-    logger.log(f"Agent systems are: \n --------- \n {"\n --------- \n".join(systems)} \n --------- \n")
+    logger.log(f"Agent systems are: \n --------- \n {"\n --------- \n".join(systems)} \n --------- \n END SYSTEM PROMPTS \n")
 
 
 run_tandem(
