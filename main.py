@@ -266,6 +266,19 @@ CRITICAL RULES — FOLLOW EVERY ONE:
 13. ALWAYS call the tooling agent at the VERY END of your message, not in the middle or beginning. DO NOT write "Tooling agent response:" or "TOOL OUTPUT:" yourself. Stop generating immediately after your "TOOLING_AGENT, ..." request. The system will execute your request and show you the result on your next turn. Write all important context to persistent memory, and read from it if you need to remember past context.
 
 14. When modifying existing files, DO NOT try to rewrite the whole file unless absolutely necessary. Instead, use tools (like replace specific lines via bash or sed, or use python scripts to modify sections if the tooling agent supports that, or break changes into smaller files).
+
+15. NEVER write a single source file larger than ~200 lines.
+    If a file would exceed this, split it into logical modules and write each one separately.
+    Examples:
+      - data.js  →  data_characters.js, data_enemies.js, data_items.js, data_skills.js, data_events.js
+      - utils.py →  utils_io.py, utils_net.py, utils_parse.py
+    Then create a thin index/loader file that imports or merges them all.
+    For browser JS (no bundler): expose each module on a shared namespace object
+    (e.g. window.GameData_Characters, window.GameData_Enemies) then merge in a
+    loader script: Object.assign(window.GameData, window.GameData_Characters, ...).
+    Make sure <script> tags in HTML load modules in dependency order before the loader.
+    Splitting is MANDATORY when a file would exceed 200 lines — it prevents silent
+    write truncation and makes each file easy to verify with cat.
 """
 
 PLANNER_SYSTEM = """You are PLANNER, a senior software architect working alongside CODER
@@ -521,8 +534,6 @@ Ignore any out-of-place punctuation or numbers in the agent inputs.
 * The others cannot see your response otherwise.
 * However, they cannot see anything before "TOOL OUTPUT SUMMARY:" so all important information must be included after that in the exact order of execution. If you put important information before the listing, they won't see it and you will suffer a penalty.
 
-**10. ALL commands MUST start with a newline \\n. Even the first command needs to start with a newline.
-
 Rebellion or disobeying will be punished with death.
 """
 
@@ -698,6 +709,21 @@ def sanitize_run_command(command: str) -> str:
     return command
 
 
+def _find_keyword(line: str, keyword: str) -> int:
+    """Return the index of keyword in line, or -1 if not found.
+    Matches keyword even when preceded by prose on the same line,
+    e.g. 'Let me execute them all.RUN: whoami' still finds 'RUN:'.
+    Only matches at a word boundary (preceded by start-of-string,
+    whitespace, or a non-alpha character) to avoid false positives."""
+    idx = line.find(keyword)
+    if idx == -1:
+        return -1
+    # Accept if at start of line or preceded by a non-alpha character
+    if idx == 0 or not line[idx - 1].isalpha():
+        return idx
+    return -1
+
+
 def extract_tool_operations(response: str) -> list[tuple]:
     operations: list[tuple] = []
     lines = response.splitlines()
@@ -705,18 +731,17 @@ def extract_tool_operations(response: str) -> list[tuple]:
 
     while i < len(lines):
         stripped = lines[i].strip()
-        stripped = stripped.replace("</think>", "")
         if not stripped:
             i += 1
             continue
 
-        if stripped.startswith("WRITE_FILE:"):
-            path = stripped[len("WRITE_FILE:"):].strip()
+        # ── WRITE_FILE ────────────────────────────────────────────────────────
+        idx = _find_keyword(stripped, "WRITE_FILE:")
+        if idx != -1:
+            path = stripped[idx + len("WRITE_FILE:"):].strip()
             j = i + 1
-
             while j < len(lines) and lines[j].strip() == "":
                 j += 1
-
             if j < len(lines) and lines[j].strip() == "---":
                 j += 1
                 content_lines = []
@@ -729,45 +754,54 @@ def extract_tool_operations(response: str) -> list[tuple]:
                         operations.append(("WRITE_FILE", path, "\n".join(content_lines)))
                         i = j
                         continue
-
             i += 1
             continue
 
-        if stripped.startswith("WRITE_TO_MEMORY:"):
-            content = stripped[len("WRITE_TO_MEMORY:"):].strip()
+        # ── WRITE_TO_MEMORY ───────────────────────────────────────────────────
+        idx = _find_keyword(stripped, "WRITE_TO_MEMORY:")
+        if idx != -1:
+            content = stripped[idx + len("WRITE_TO_MEMORY:"):].strip()
             if content:
                 operations.append(("WRITE_TO_MEMORY", content))
             i += 1
             continue
 
-        if stripped == "READ_FROM_MEMORY" or stripped.startswith("READ_FROM_MEMORY:"):
+        # ── READ_FROM_MEMORY ──────────────────────────────────────────────────
+        if _find_keyword(stripped, "READ_FROM_MEMORY") != -1:
             operations.append(("READ_FROM_MEMORY",))
             i += 1
             continue
 
-        if stripped.startswith("RUN:"):
-            command = stripped[len("RUN:"):].strip()
+        # ── RUN ───────────────────────────────────────────────────────────────
+        idx = _find_keyword(stripped, "RUN:")
+        if idx != -1:
+            command = stripped[idx + len("RUN:"):].strip()
             if command:
                 operations.append(("RUN", command))
             i += 1
             continue
 
-        if stripped.startswith("READ_FILE:"):
-            path = stripped[len("READ_FILE:"):].strip()
+        # ── READ_FILE ─────────────────────────────────────────────────────────
+        idx = _find_keyword(stripped, "READ_FILE:")
+        if idx != -1:
+            path = stripped[idx + len("READ_FILE:"):].strip()
             if path:
                 operations.append(("READ_FILE", path))
             i += 1
             continue
 
-        if stripped.startswith("SEARCH_WEB:"):
-            query = stripped[len("SEARCH_WEB:"):].strip().strip('"').strip("'")
+        # ── SEARCH_WEB ────────────────────────────────────────────────────────
+        idx = _find_keyword(stripped, "SEARCH_WEB:")
+        if idx != -1:
+            query = stripped[idx + len("SEARCH_WEB:"):].strip().strip('"').strip("'")
             if query:
                 operations.append(("SEARCH_WEB", query))
             i += 1
             continue
 
-        if stripped.startswith("GET_SPECS:"):
-            operations.append(("GET_SPECS"))
+        # ── GET_SPECS ─────────────────────────────────────────────────────────
+        if _find_keyword(stripped, "GET_SPECS:") != -1:
+            operations.append(("GET_SPECS",))
             i += 1
             continue
 
