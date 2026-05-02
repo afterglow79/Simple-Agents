@@ -288,6 +288,8 @@ CRITICAL RULES — FOLLOW EVERY ONE:
     Make sure <script> tags in HTML load modules in dependency order before the loader.
     Splitting is a soft requirement when a file would exceed {max_lines} lines. You can go a little over, but it cannot be a huge difference. This prevents silent
     write truncation and makes each file easy to verify with cat.
+
+16. The user is on {"Windows" if windows else "Linux"}. This is to be considered the actual truth, no matter anything else that is said in your prompts. Use the correct commands for the OS.
 """
 
 PLANNER_SYSTEM = """You are PLANNER, a senior software architect working alongside CODER
@@ -563,33 +565,71 @@ if os.path.isdir(_tools_dir):
 
 systems = [PLANNER_SYSTEM, CODER_SYSTEM, TOOLING_AGENT_SYSTEM, TOOL_INSTRUCTIONS]
 
+# Map of OS-specific substitutions — ordered from most-specific to least-specific
+# to avoid partial-match clobbering (e.g. "ls -la" before bare "ls")
+WINDOWS_SUBSTITUTIONS = [
+    # Specific command forms first
+    ("ls -la /absolute/path/to/file", "dir /absolute/path/to/file"),
+    ("ls -la", "dir"),
+    ("ls -1", "dir /b"),
+    ("ls", "dir"),
+    ("cat", "type"),
+    ("pwd", "cd"),
+    ("python3", "python"),
+    # OS name variants
+    ("Linux", "Windows"),
+    ("LINUX", "WINDOWS"),
+    ("linux", "windows"),
+    # ls output format examples in the prompts
+    ("-rw-rw-r-- 1 user user 0 Apr 26 12:00 file.py",
+     "04/26/2026  12:00 PM                 0 file.py"),
+    ("-rw-rw-r-- 1 user user 1826 Apr 26 12:00 file.py",
+     "04/26/2026  12:00 PM              1826 file.py"),
+    # Heredoc example
+    ("cat > file.py << EOF",
+     "(echo # contents && echo print(\"Hello world\")) > file.py"),
+    # Absolute path separators
+    ("- la", ""),
+    ("-la", "")
+]
+
+WINDOWS_ADDENDUM = """
+
+══════════════════════════════════════════════════
+OPERATING SYSTEM: WINDOWS — CRITICAL INSTRUCTIONS
+══════════════════════════════════════════════════
+You are running on native Windows. This is NOT Linux. This is NOT WSL.
+Do NOT use Linux commands. Do NOT assume WSL or a Linux subsystem exists.
+Do NOT use forward slashes in file paths.
+Do NOT guess that paths like C:\\Users\\... map to /mnt/c/... — they do not.
+Use Windows commands only:
+  - dir   (not ls)
+  - type  (not cat)
+  - cd    (not pwd)
+  - copy  (not cp)
+  - move  (not mv)
+  - del   (not rm)
+  - python  (not python3)
+Shell is cmd.exe or PowerShell. Bash does not exist on this machine.
+All paths use backslashes: C:\\Users\\...\\project\\file.py
+"""
 
 if windows:
     for i, system in enumerate(systems):
-        system = system.replace("ls -la /absolute/path/to/file", "dir \\absolute\\path\\to\\file")
-        system = system.replace("ls", "dir")
-        system = system.replace("cat", "type")
-        system = system.replace("-rw-rw-r-- 1 user user 0 Apr 26 12:00 file.py", "04/26/2026  12:00 PM                 0 file.py")
-        system = system.replace("-rw-rw-r-- 1 user user 1826 Apr 26 12:00 file.py", "04/26/2026  12:00 PM                 1826 file.py")
-        system = system.replace("pwd", "cd")
-        system = system.replace("Linux", "Windows")
-        system = system.replace("LINUX", "WINDOWS")
-        system = system.replace("linux", "windows")
-        system = system.replace("cat > file.py << EOF", """
-(
-echo # contents
-echo print("Hello world")
-) > file.py
-)
-"""
-
-                       )
-        system = system.replace("/", "\\")
-        system += ("NEVER use any Linux commands. If you do, they will not work. You are not on Linux, you are on Windows.")
+        for old, new in WINDOWS_SUBSTITUTIONS:
+            system = system.replace(old, new)
+        system += WINDOWS_ADDENDUM
         systems[i] = system
+BLOCKED: list[str] = ["rm -rf", "mkfs", "dd if=", "shutdown", "reboot", "> /dev/sd"]
+# Append BLOCKED COMMANDS to the system that's actually in the list
+# (not the original variable, which is now stale)
+TOOLING_AGENT_SYSTEM_IDX = 2  # index in `systems`
+systems[TOOLING_AGENT_SYSTEM_IDX] += (
+    "\n\n" + f"BLOCKED COMMANDS: {', '.join(BLOCKED)}. If you try to run these, they will not work."
+)
 # ── Command execution ─────────────────────────────────────────────────────────
 
-BLOCKED = ["rm -rf", "mkfs", "dd if=", "shutdown", "reboot", "> /dev/sd"]
+
 
 TOOLING_AGENT_SYSTEM += "\n\n" + f"BLOCKED COMMANDS: {', '.join(BLOCKED)}. If you try to run these, they will not work."
 
