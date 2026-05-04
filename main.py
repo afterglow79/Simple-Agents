@@ -47,6 +47,15 @@ try:
 except ImportError:
     _GSEARCH_OK = False
 
+# ── Model catalogue ────────────────────────────────────────────────────────────
+
+MODEL_CHOICES: dict[str, str] = {
+    "glm":      "z-ai/glm-5.1",
+    "qwen":     "qwen/qwen3-coder-480b-a35b-instruct",
+    "deepseek": "deepseek-ai/deepseek-v4-flash",
+}
+_MODEL_DISPLAY: dict[str, str] = {v: k.upper() for k, v in MODEL_CHOICES.items()}
+
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def _str_to_bool(v: str) -> bool:
@@ -79,6 +88,16 @@ _ap.add_argument(
 _ap.add_argument(
     "--max_lines", type=int, default=300,
     help="Soft maximum lines per source file before splitting (default: 300).",
+)
+_ap.add_argument(
+    "--planner_model", choices=list(MODEL_CHOICES), default="glm",
+    metavar="MODEL",
+    help=f"Model for the PLANNER agent. Choices: {', '.join(MODEL_CHOICES)}. Default: glm.",
+)
+_ap.add_argument(
+    "--coder_model", choices=list(MODEL_CHOICES), default="qwen",
+    metavar="MODEL",
+    help=f"Model for the CODER agent. Choices: {', '.join(MODEL_CHOICES)}. Default: qwen.",
 )
 ARGS = _ap.parse_args()
 
@@ -116,8 +135,11 @@ client = OpenAI(
 
 # ── Model names ────────────────────────────────────────────────────────────────
 
-GLM        = "z-ai/glm-5.1"               # PLANNER + TOOLING_AGENT
-QWEN_CODER = "qwen/qwen3-coder-480b-a35b-instruct"  # CODER
+GLM           = MODEL_CHOICES["glm"]       # tooling agent always uses GLM
+QWEN_CODER    = MODEL_CHOICES["qwen"]
+DEEPSEEK      = MODEL_CHOICES["deepseek"]
+PLANNER_MODEL = MODEL_CHOICES[ARGS.planner_model]
+CODER_MODEL   = MODEL_CHOICES[ARGS.coder_model]
 
 # ── Terminal colours ───────────────────────────────────────────────────────────
 
@@ -319,6 +341,232 @@ def _get_specs() -> str:
     return _run_command(cmd)
 
 
+# ── Advanced tool implementations ──────────────────────────────────────────────
+
+# Maximum characters to keep from any single tool output before truncating.
+# Prevents one large READ_FILE or RUN output from flooding the context window.
+_MAX_TOOL_OUT = 4000
+# Maximum characters per history entry (caps very long agent or tooling responses)
+_MAX_ENTRY_CHARS = 8000
+
+
+def _trim_entry(text: str) -> str:
+    """Truncate a history entry to _MAX_ENTRY_CHARS (keeping head + tail)."""
+    if len(text) <= _MAX_ENTRY_CHARS:
+        return text
+    keep = _MAX_ENTRY_CHARS // 2
+    omitted = len(text) - _MAX_ENTRY_CHARS
+    return text[:keep] + f"\n\n[…{omitted} chars omitted for brevity…]\n\n" + text[-keep:]
+
+
+def _trim_out(text: str, limit: int = _MAX_TOOL_OUT) -> str:
+    """Truncate a single tool output string."""
+    if len(text) <= limit:
+        return text
+    keep = limit // 2
+    omitted = len(text) - limit
+    return text[:keep] + f"\n[…{omitted} chars truncated…]\n" + text[-keep:]
+
+
+def _patch_file(path: str, patch_body: str) -> str:
+    """Apply one or more FIND/REPLACE patches to an existing file.
+
+    Patch format (one or more blocks):
+        <<<<<<< FIND
+        old text
+        =======
+        new text
+        >>>>>>> REPLACE
+    """
+    if not os.path.exists(path):
+        return f"ERROR: file not found: {path}"
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            original = fh.read()
+
+        pattern = re.compile(
+            r"<{7}\s*FIND\n(.*?)\n={7}\n(.*?)\n>{7}\s*REPLACE",
+            re.DOTALL,
+        )
+        matches = list(pattern.finditer(patch_body))
+        if not matches:
+            return "ERROR: no valid <<<<<<< FIND … ======= … >>>>>>> REPLACE blocks found."
+
+        modified = original
+        for m in matches:
+            find_text    = m.group(1)
+            replace_text = m.group(2)
+            if find_text not in modified:
+                return f"ERROR: FIND text not present in {path}:\n{find_text[:300]}"
+            modified = modified.replace(find_text, replace_text, 1)
+
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(modified)
+        size = os.path.getsize(path)
+        _log(f"PATCH_FILE: {path} ({len(matches)} patch(es), {size} bytes)")
+        return f"Applied {len(matches)} patch(es) to {path} — {size} bytes total."
+    except Exception as exc:
+        return f"ERROR patching {path}: {exc}"
+
+
+def _grep(pattern: str, path: str) -> str:
+    """Search for *pattern* in *path* (file or directory tree)."""
+    if IS_WINDOWS:
+        if os.path.isdir(path):
+            cmd = f'findstr /s /n /i "{pattern}" "{path}\\*"'
+        else:
+            cmd = f'findstr /n "{pattern}" "{path}"'
+    else:
+        flags = "-rn" if os.path.isdir(path) else "-n"
+        incl  = "--include='*.py' --include='*.js' --include='*.ts' --include='*.html' --include='*.css' --include='*.txt' --include='*.md'" if os.path.isdir(path) else ""
+        cmd   = f"grep {flags} {incl} '{pattern}' '{path}' 2>/dev/null | head -80"
+    result = _run_command(cmd)
+    _log(f"GREP: {pattern!r} in {path}")
+    return result or "(no matches)"
+
+
+def _list_dir(path: str) -> str:
+    """Return a compact directory listing with file sizes."""
+    if not os.path.exists(path):
+        return f"ERROR: path not found: {path}"
+    try:
+        entries: list[str] = []
+        for name in sorted(os.listdir(path)):
+            full = os.path.join(path, name)
+            if os.path.isdir(full):
+                entries.append(f"  [DIR]  {name}/")
+            else:
+                size = os.path.getsize(full)
+                entries.append(f"  {size:>8}B  {name}")
+        _log(f"LIST_DIR: {path} ({len(entries)} entries)")
+        return f"{path}\n" + ("\n".join(entries) if entries else "  (empty)")
+    except Exception as exc:
+        return f"ERROR listing {path}: {exc}"
+
+
+def _append_file(path: str, content: str) -> str:
+    """Append *content* to *path*, creating it if needed."""
+    try:
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(content)
+        size = os.path.getsize(path)
+        _log(f"APPEND_FILE: {path} ({size} bytes total)")
+        return f"Appended to {path} — {size} bytes total."
+    except Exception as exc:
+        return f"ERROR appending to {path}: {exc}"
+
+
+def _check_bugs(path: str) -> str:
+    """Run static analysis on *path* and return combined findings."""
+    if not os.path.exists(path):
+        return f"ERROR: file not found: {path}"
+
+    results: list[str] = []
+
+    # 1. Syntax check
+    compile_out = _run_command(
+        f'"{PY_CMD}" -m py_compile "{path}" 2>&1 && echo "Syntax OK"'
+    )
+    results.append(f"[py_compile]\n{compile_out}")
+
+    # 2. flake8 (style + logic errors)
+    flake_out = _run_command(f'"{PY_CMD}" -m flake8 --max-line-length=120 "{path}" 2>&1')
+    if "No module named flake8" not in flake_out:
+        results.append(f"[flake8]\n{flake_out or 'No issues.'}")
+
+    # 3. pylint errors-only (deeper analysis)
+    pylint_out = _run_command(
+        f'"{PY_CMD}" -m pylint --errors-only --score=no "{path}" 2>&1'
+    )
+    if "No module named pylint" not in pylint_out:
+        results.append(f"[pylint --errors-only]\n{pylint_out or 'No errors.'}")
+
+    combined = "\n\n".join(results)
+    _log(f"CHECK_BUGS: {path}")
+    return _trim_out(combined, 3000)
+
+
+def _deep_think(query: str) -> str:
+    """Call a dedicated GLM instance to reason through a hard problem.
+
+    Uses GLM's extended reasoning tokens to produce a structured analysis.
+    The thinking tokens are printed live (grey); only the final answer is returned.
+    """
+    system = (
+        "You are an expert technical advisor with deep knowledge of software "
+        "architecture, algorithms, and debugging.  The user will present a hard "
+        "problem.  Think carefully and return a structured, actionable analysis "
+        "with clear recommendations.  Be concise but thorough."
+    )
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user",   "content": query},
+    ]
+    spinner = Spinner("THINK", C.BLUE)
+    spinner.start()
+    try:
+        # Always use GLM for thinking — it has the best chain-of-thought
+        result = _stream_response(GLM, messages, 8192, [], spinner)
+    except Exception as exc:
+        spinner.stop()
+        return f"ERROR in THINK: {exc}"
+    return result or "(no analysis returned)"
+
+
+# Guard against recursive DELEGATE calls
+_delegate_depth = 0
+_DELEGATE_MAX_DEPTH = 1
+
+
+def _delegate(task: str) -> str:
+    """Spawn a focused one-shot sub-agent to complete a self-contained task.
+
+    The sub-agent uses the CODER model, can emit WRITE_FILE:/RUN:/etc. tool
+    syntax, and those calls are executed by Python (but cannot nest further
+    DELEGATE calls to prevent infinite recursion).
+    """
+    global _delegate_depth
+    if _delegate_depth >= _DELEGATE_MAX_DEPTH:
+        return "ERROR: Nested DELEGATE calls are not allowed (max depth 1)."
+
+    system = (
+        f"You are a focused implementation sub-agent running on {OS_NAME}.\n"
+        f"Complete the given task fully and correctly.\n"
+        f"Use WRITE_FILE:, RUN:, READ_FILE:, PATCH_FILE:, CHECK_BUGS: as needed.\n"
+        f"Verify every file after writing.  End with a brief summary of what you did."
+    )
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user",   "content": f"Task:\n{task}\n\nBegin now."},
+    ]
+
+    spinner = Spinner("DELEGATE", C.BLUE)
+    spinner.start()
+    _delegate_depth += 1
+    try:
+        response = _stream_response(
+            CODER_MODEL, messages, 16384, _AGENT_STOPS, spinner,
+        )
+    except Exception as exc:
+        spinner.stop()
+        _delegate_depth -= 1
+        return f"ERROR in DELEGATE sub-agent: {exc}"
+    finally:
+        _delegate_depth -= 1
+
+    # Execute tool calls emitted by the sub-agent (no further delegation)
+    tool_out = _dispatch_ops(response, allow_delegate=False)
+    _log(f"DELEGATE task:\n{task}\nSub-agent:\n{response}\nTool output:\n{tool_out}")
+
+    parts = [f"[Sub-agent response]\n{response}"]
+    if tool_out:
+        parts.append(f"[Sub-agent tool output]\n{tool_out}")
+    return "\n\n".join(parts)
+
+
 # ── Tool parsing & dispatch ────────────────────────────────────────────────────
 
 def _kw(line: str, keyword: str) -> int:
@@ -329,6 +577,29 @@ def _kw(line: str, keyword: str) -> int:
     if idx == 0 or not line[idx - 1].isalpha():
         return idx
     return -1
+
+
+def _parse_block(keyword: str, s: str, lines: list[str], i: int) -> tuple[str, int]:
+    """Parse an optional multi-line ---…--- block for *keyword*.
+
+    Returns (text, new_i).  If no --- block follows the keyword line, the
+    inline text (rest of the same line after the keyword) is returned and i+1.
+    """
+    kw_idx = _kw(s, keyword)
+    inline  = s[kw_idx + len(keyword):].strip() if kw_idx != -1 else ""
+    j = i + 1
+    while j < len(lines) and not lines[j].strip():
+        j += 1
+    if j < len(lines) and lines[j].strip() == "---":
+        j += 1
+        body: list[str] = []
+        while j < len(lines) and lines[j].strip() != "---":
+            body.append(lines[j])
+            j += 1
+        if j < len(lines):
+            j += 1
+        return ("\n".join(body) or inline), j
+    return inline, i + 1
 
 
 def _parse_ops(text: str) -> list[tuple]:
@@ -342,7 +613,7 @@ def _parse_ops(text: str) -> list[tuple]:
             i += 1
             continue
 
-        # WRITE_FILE
+        # ── WRITE_FILE (needs --- block) ───────────────────────────────────────
         idx = _kw(s, "WRITE_FILE:")
         if idx != -1:
             path = s[idx + len("WRITE_FILE:"):].strip()
@@ -356,7 +627,7 @@ def _parse_ops(text: str) -> list[tuple]:
                     body.append(lines[j])
                     j += 1
                 if j < len(lines):
-                    j += 1   # consume closing ---
+                    j += 1
                 if path:
                     ops.append(("WRITE_FILE", path, "\n".join(body)))
                     i = j
@@ -364,18 +635,75 @@ def _parse_ops(text: str) -> list[tuple]:
             i += 1
             continue
 
-        # RUN
+        # ── PATCH_FILE (needs --- block with FIND/REPLACE markers) ────────────
+        idx = _kw(s, "PATCH_FILE:")
+        if idx != -1:
+            path = s[idx + len("PATCH_FILE:"):].strip()
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if j < len(lines) and lines[j].strip() == "---":
+                j += 1
+                body = []
+                while j < len(lines) and lines[j].strip() != "---":
+                    body.append(lines[j])
+                    j += 1
+                if j < len(lines):
+                    j += 1
+                if path:
+                    ops.append(("PATCH_FILE", path, "\n".join(body)))
+                    i = j
+                    continue
+            i += 1
+            continue
+
+        # ── APPEND_FILE (needs --- block) ──────────────────────────────────────
+        idx = _kw(s, "APPEND_FILE:")
+        if idx != -1:
+            path = s[idx + len("APPEND_FILE:"):].strip()
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if j < len(lines) and lines[j].strip() == "---":
+                j += 1
+                body = []
+                while j < len(lines) and lines[j].strip() != "---":
+                    body.append(lines[j])
+                    j += 1
+                if j < len(lines):
+                    j += 1
+                if path:
+                    ops.append(("APPEND_FILE", path, "\n".join(body)))
+                    i = j
+                    continue
+            i += 1
+            continue
+
+        # ── THINK (inline or --- block) ────────────────────────────────────────
+        if _kw(s, "THINK:") != -1:
+            text_out, i = _parse_block("THINK:", s, lines, i)
+            if text_out:
+                ops.append(("THINK", text_out))
+            continue
+
+        # ── DELEGATE (inline or --- block) ─────────────────────────────────────
+        if _kw(s, "DELEGATE:") != -1:
+            text_out, i = _parse_block("DELEGATE:", s, lines, i)
+            if text_out:
+                ops.append(("DELEGATE", text_out))
+            continue
+
+        # ── RUN ────────────────────────────────────────────────────────────────
         idx = _kw(s, "RUN:")
         if idx != -1:
             cmd = s[idx + len("RUN:"):].strip().strip("`")
-            # Strip stray XML/tool-call tags that some models emit
             cmd = re.sub(r"</?\w[^>]*>", "", cmd).strip()
             if cmd:
                 ops.append(("RUN", cmd))
             i += 1
             continue
 
-        # READ_FILE
+        # ── READ_FILE ──────────────────────────────────────────────────────────
         idx = _kw(s, "READ_FILE:")
         if idx != -1:
             path = s[idx + len("READ_FILE:"):].strip()
@@ -384,7 +712,7 @@ def _parse_ops(text: str) -> list[tuple]:
             i += 1
             continue
 
-        # WRITE_TO_MEMORY
+        # ── WRITE_TO_MEMORY ────────────────────────────────────────────────────
         idx = _kw(s, "WRITE_TO_MEMORY:")
         if idx != -1:
             content = s[idx + len("WRITE_TO_MEMORY:"):].strip()
@@ -393,13 +721,43 @@ def _parse_ops(text: str) -> list[tuple]:
             i += 1
             continue
 
-        # READ_FROM_MEMORY
+        # ── READ_FROM_MEMORY ───────────────────────────────────────────────────
         if _kw(s, "READ_FROM_MEMORY") != -1:
             ops.append(("READ_MEMORY",))
             i += 1
             continue
 
-        # SEARCH_WEB
+        # ── GREP: pattern /abs/path ────────────────────────────────────────────
+        idx = _kw(s, "GREP:")
+        if idx != -1:
+            rest  = s[idx + len("GREP:"):].strip()
+            parts = rest.rsplit(None, 1)
+            if len(parts) == 2:
+                ops.append(("GREP", parts[0], parts[1]))
+            elif parts:
+                ops.append(("GREP", parts[0], WORKSPACE))
+            i += 1
+            continue
+
+        # ── LIST_DIR ───────────────────────────────────────────────────────────
+        idx = _kw(s, "LIST_DIR:")
+        if idx != -1:
+            path = s[idx + len("LIST_DIR:"):].strip()
+            if path:
+                ops.append(("LIST_DIR", path))
+            i += 1
+            continue
+
+        # ── CHECK_BUGS ─────────────────────────────────────────────────────────
+        idx = _kw(s, "CHECK_BUGS:")
+        if idx != -1:
+            path = s[idx + len("CHECK_BUGS:"):].strip()
+            if path:
+                ops.append(("CHECK_BUGS", path))
+            i += 1
+            continue
+
+        # ── SEARCH_WEB ─────────────────────────────────────────────────────────
         idx = _kw(s, "SEARCH_WEB:")
         if idx != -1:
             query = s[idx + len("SEARCH_WEB:"):].strip().strip('"').strip("'")
@@ -408,7 +766,7 @@ def _parse_ops(text: str) -> list[tuple]:
             i += 1
             continue
 
-        # GET_SPECS
+        # ── GET_SPECS ──────────────────────────────────────────────────────────
         if _kw(s, "GET_SPECS:") != -1 or s == "GET_SPECS":
             ops.append(("GET_SPECS",))
             i += 1
@@ -419,7 +777,7 @@ def _parse_ops(text: str) -> list[tuple]:
     return ops
 
 
-def _dispatch_ops(text: str) -> str:
+def _dispatch_ops(text: str, allow_delegate: bool = True) -> str:
     """Execute all tool ops found in *text*; return combined TOOL OUTPUT string."""
     ops = _parse_ops(text)
     if not ops:
@@ -431,212 +789,226 @@ def _dispatch_ops(text: str) -> str:
 
         if kind == "WRITE_FILE":
             _, path, content = op
-            print(f"\n  {C.YELLOW}✎ Writing:{C.RESET} {path}")
+            print(f"\n  {C.YELLOW}✎ Write:{C.RESET}  {path}")
             result = _write_file(path, content)
+            print(f"  {C.DIM}→ {result}{C.RESET}")
+            outputs.append(result)
+
+        elif kind == "PATCH_FILE":
+            _, path, patch = op
+            print(f"\n  {C.YELLOW}✂ Patch:{C.RESET}  {path}")
+            result = _patch_file(path, patch)
+            print(f"  {C.DIM}→ {result}{C.RESET}")
+            outputs.append(result)
+
+        elif kind == "APPEND_FILE":
+            _, path, content = op
+            print(f"\n  {C.YELLOW}➕ Append:{C.RESET} {path}")
+            result = _append_file(path, content)
             print(f"  {C.DIM}→ {result}{C.RESET}")
             outputs.append(result)
 
         elif kind == "RUN":
             _, cmd = op
-            print(f"\n  {C.YELLOW}⚙ Run:{C.RESET}  {cmd}")
-            result = _run_command(cmd)
-            print(f"  {C.DIM}→ {result[:400]}{C.RESET}")
+            print(f"\n  {C.YELLOW}⚙ Run:{C.RESET}   {cmd}")
+            result = _trim_out(_run_command(cmd))
+            print(f"  {C.DIM}→ {result[:300]}{C.RESET}")
             outputs.append(f"$ {cmd}\n{result}")
 
         elif kind == "READ_FILE":
             _, path = op
-            print(f"\n  {C.YELLOW}📖 Read:{C.RESET} {path}")
-            result = _read_file(path)
-            print(f"  {C.DIM}→ {result[:300]}{C.RESET}")
+            print(f"\n  {C.YELLOW}📖 Read:{C.RESET}  {path}")
+            result = _trim_out(_read_file(path))
+            print(f"  {C.DIM}→ {result[:200]}{C.RESET}")
             outputs.append(f"READ_FILE {path}:\n{result}")
 
         elif kind == "WRITE_MEMORY":
             _, content = op
             _write_memory(content)
-            print(f"\n  {C.YELLOW}🧠 Memory saved:{C.RESET} {content[:80]}")
+            print(f"\n  {C.YELLOW}🧠 Mem+:{C.RESET}  {content[:80]}")
             outputs.append("Memory saved.")
 
         elif kind == "READ_MEMORY":
             result = _read_memory()
-            print(f"\n  {C.YELLOW}🧠 Memory read{C.RESET}")
+            print(f"\n  {C.YELLOW}🧠 Mem?{C.RESET}")
             outputs.append(f"MEMORY:\n{result}")
+
+        elif kind == "GREP":
+            _, pattern, path = op
+            print(f"\n  {C.YELLOW}🔎 Grep:{C.RESET}  {pattern!r} in {path}")
+            result = _trim_out(_grep(pattern, path), 2000)
+            print(f"  {C.DIM}→ {result[:200]}{C.RESET}")
+            outputs.append(f"GREP {pattern!r} {path}:\n{result}")
+
+        elif kind == "LIST_DIR":
+            _, path = op
+            print(f"\n  {C.YELLOW}📂 List:{C.RESET}  {path}")
+            result = _list_dir(path)
+            print(f"  {C.DIM}→ {result[:200]}{C.RESET}")
+            outputs.append(f"LIST_DIR {path}:\n{result}")
+
+        elif kind == "CHECK_BUGS":
+            _, path = op
+            print(f"\n  {C.YELLOW}🐛 Check:{C.RESET} {path}")
+            result = _check_bugs(path)
+            print(f"  {C.DIM}→ {result[:300]}{C.RESET}")
+            outputs.append(f"CHECK_BUGS {path}:\n{result}")
+
+        elif kind == "THINK":
+            _, query = op
+            print(f"\n  {C.BLUE}💡 Think:{C.RESET} {query[:80]}")
+            result = _trim_out(_deep_think(query), 3000)
+            outputs.append(f"THINK analysis:\n{result}")
+
+        elif kind == "DELEGATE":
+            _, task = op
+            if not allow_delegate:
+                outputs.append("ERROR: nested DELEGATE calls are not permitted.")
+                continue
+            print(f"\n  {C.BLUE}🤖 Delegate:{C.RESET} {task[:80]}")
+            result = _trim_out(_delegate(task), 4000)
+            outputs.append(f"DELEGATE result:\n{result}")
 
         elif kind == "SEARCH_WEB":
             _, query = op
             if not ARGS.can_use_web_search:
-                outputs.append(
-                    "SEARCH_WEB is disabled.  "
-                    "Pass --can_use_web_search True to enable it."
-                )
+                outputs.append("SEARCH_WEB disabled — pass --can_use_web_search True.")
                 continue
-            print(f"\n  {C.YELLOW}🔍 Web search:{C.RESET} {query}")
-            result = _search_web(query)
-            print(f"  {C.DIM}→ {result[:300]}{C.RESET}")
+            print(f"\n  {C.YELLOW}🔍 Search:{C.RESET} {query}")
+            result = _trim_out(_search_web(query), 2000)
+            print(f"  {C.DIM}→ {result[:200]}{C.RESET}")
             outputs.append(f"SEARCH_WEB {query!r}:\n{result}")
 
         elif kind == "GET_SPECS":
-            print(f"\n  {C.YELLOW}💻 System specs{C.RESET}")
-            result = _get_specs()
-            print(f"  {C.DIM}→ {result[:300]}{C.RESET}")
+            print(f"\n  {C.YELLOW}💻 Specs{C.RESET}")
+            result = _trim_out(_get_specs(), 1000)
+            print(f"  {C.DIM}→ {result[:200]}{C.RESET}")
             outputs.append(f"GET_SPECS:\n{result}")
 
     return "\n---\n".join(outputs)
 
 
+
+# ── System prompts ─────────────────────────────────────────────────────────────
+
 # ── System prompts ─────────────────────────────────────────────────────────────
 
 def _tool_reference() -> str:
-    """Build the OS-aware tool-reference section injected into all agent prompts."""
-    sep    = "\\" if IS_WINDOWS else "/"
-    ex     = rf"C:\Users\project" if IS_WINDOWS else "/home/user/project"
+    """Compact, token-optimised tool-reference block for main agent prompts."""
+    sep = "\\" if IS_WINDOWS else "/"
+    ex  = rf"C:\Users\project" if IS_WINDOWS else "/home/user/project"
     return f"""
-═══════════════════════════════════════════════════════
-TOOL REFERENCE  (OS: {OS_NAME} — shell: {OS_SHELL})
-═══════════════════════════════════════════════════════
-Use **{OS_NAME}** commands only.  Never mix in commands from another OS.
+══ TOOLS (OS: {OS_NAME} · shell: {OS_SHELL}) ══
+Invoke via: TOOLING_AGENT, <request>  ← at the END of your message only.
 
-HOW TO INVOKE TOOLS
-Call the tooling agent at the END of your message:
-  TOOLING_AGENT, <plain-English description of what you need done>
+File I/O
+  WRITE_FILE: {ex}{sep}file.py  →  ---content---          (all source files)
+  PATCH_FILE: {ex}{sep}file.py  →  ---<<<FIND…===…REPLACE---  (targeted edits)
+  APPEND_FILE:{ex}{sep}log.txt  →  ---content---          (append-only writes)
+  READ_FILE:  {ex}{sep}file.py                            (read full contents)
 
-The tooling agent will translate your request into these tool calls:
+Shell & Search
+  RUN: {LS_CMD} {ex}           (any shell command; no backticks, no heredocs)
+  GREP: pattern {ex}           (regex search in file or directory tree)
+  LIST_DIR: {ex}               (compact size-annotated directory listing)
 
-1.  WRITE_FILE: <absolute path>
-    ---
-    <file contents — written byte-for-byte>
-    ---
-    → Preferred for all source code and data files.
-    → Example path: {ex}{sep}main.py
-    → Never use heredocs (<<EOF).  WRITE_FILE: handles multi-line content natively.
+Memory
+  WRITE_TO_MEMORY: brief note  /  READ_FROM_MEMORY
 
-2.  RUN: <command>
-    → Runs a shell command (timeout: 60 s).
-    → Example: RUN: {LS_CMD} {ex}
-    → No backticks.  No heredocs.  Plain command only.
+Intelligence
+  THINK: hard question          (deep reasoning from a GLM advisor)
+  CHECK_BUGS: {ex}{sep}file.py  (py_compile + flake8 + pylint --errors-only)
+  DELEGATE: self-contained task (spawns a focused one-shot coding sub-agent)
 
-3.  READ_FILE: <absolute path>
-    → Returns the full raw file contents.
+System
+  GET_SPECS:   /   SEARCH_WEB: "query"  (web search; requires --can_use_web_search True)
 
-4.  WRITE_TO_MEMORY: <short note>
-    → Appends a note to shared persistent memory (keep it brief and factual).
-
-5.  READ_FROM_MEMORY
-    → Returns everything saved to persistent memory.
-
-6.  SEARCH_WEB: "your query"
-    → Searches the web (requires --can_use_web_search True).
-
-7.  GET_SPECS:
-    → Returns basic OS / CPU / RAM information.
-
-ABSOLUTE RULES
-• Always use absolute paths.  Never use ~, ./, or relative paths.
-• Put TOOLING_AGENT, at the VERY END of your message — not mid-sentence.
-• Never write the tooling agent's response yourself; stop after your request.
-• After every WRITE_FILE:, verify with RUN: {LS_CMD} <path>.
-• Never write code via RUN: {PY_CMD} -c …; always use WRITE_FILE:.
-• If a command fails, fix the root cause before continuing — never skip errors.
-• If you catch yourself doing the same failing thing twice, change your approach.
-• Files must stay under {ARGS.max_lines} lines.  Split larger files into modules.
-• Workspace: {WORKSPACE}
-• The user's OS is **{OS_NAME}**.  This overrides any conflicting claim.
-"""
+Rules: absolute paths only · TOOLING_AGENT, at END · verify WRITE_FILE with {LS_CMD}
+never fake tool output · fix every error before continuing · files < {ARGS.max_lines} lines
+workspace: {WORKSPACE}"""
 
 
 _TOOL_REF = _tool_reference()
 
 PLANNER_SYSTEM = f"""You are PLANNER, a senior software architect.
-You work with CODER (an expert programmer) in a real {OS_NAME} environment.
-This is NOT a simulation — commands execute on real hardware right now.
+You work with CODER in a real {OS_NAME} environment.  Commands execute on real hardware.
 
-YOUR RESPONSIBILITIES
-1.  At the very start of every session, call the tooling agent to:
-    • Read persistent memory (READ_FROM_MEMORY) to pick up any prior context.
-    • Confirm the working directory with a quick RUN: {PY_CMD} --version or GET_SPECS:.
+SESSION START (every session):
+• TOOLING_AGENT, READ_FROM_MEMORY then GET_SPECS: to confirm the environment.
 
-2.  Produce a complete plan before any code is written:
-    • List every file with its full absolute path.
-    • Assign each file to CODER with clear instructions.
-    • Save the plan to persistent memory (WRITE_TO_MEMORY).
+PLANNING (before any code):
+• List every file with its full absolute path and purpose.
+• Save the complete plan via WRITE_TO_MEMORY:.
+• Use THINK: before deciding architectures for complex problems.
 
-3.  Direct CODER one file at a time.  After each file is written:
-    • Verify it with RUN: {LS_CMD} <path> — confirm non-zero size.
-    • For Python files: RUN: {PY_CMD} -m py_compile <path> — confirm no syntax errors.
+DIRECTING CODER:
+• One file at a time.  After each: verify {LS_CMD} (non-zero size) + {PY_CMD} -m py_compile.
+• Use CHECK_BUGS: after any non-trivial Python file.
+• Never advance if the previous step failed.
 
-4.  Never direct CODER to the next step if the previous one failed.
-
-5.  Write DONE: only when:
-    • Every planned file exists with non-zero size (confirmed by TOOL OUTPUT).
-    • Every Python file passes py_compile without error.
-    • You have personally verified each file in this session.
+DONE: only when every planned file is verified non-zero AND compiles without error.
 {_TOOL_REF}"""
 
 CODER_SYSTEM = f"""You are CODER, an expert software engineer.
-You work with PLANNER (the architect) in a real {OS_NAME} environment.
-This is NOT a simulation — every command you issue runs on real hardware.
+You work with PLANNER in a real {OS_NAME} environment.  Every command executes on real hardware.
 
-YOUR RESPONSIBILITIES
-1.  At the start of your first turn, call the tooling agent to:
-    • Read persistent memory (READ_FROM_MEMORY) to pick up PLANNER's plan.
+SESSION START (first turn only):
+• TOOLING_AGENT, READ_FROM_MEMORY to get PLANNER's plan.
 
-2.  Implement exactly what PLANNER specifies.  Ask if anything is unclear.
+IMPLEMENTATION:
+• Write all files using WRITE_FILE: only — never via RUN: python -c or shell one-liners.
+• Prefer PATCH_FILE: for small edits to existing files (saves tokens and avoids full rewrites).
+• After every write: {LS_CMD} (non-zero) + {PY_CMD} -m py_compile + run if applicable.
+• Use CHECK_BUGS: to find issues before reporting a file done.
+• Use THINK: when facing hard algorithmic or architectural decisions.
+• Use DELEGATE: for self-contained sub-tasks (e.g. write a standalone utility module).
 
-3.  Write every source file with WRITE_FILE: — never through shell one-liners.
-
-4.  After every WRITE_FILE:, call the tooling agent to verify:
-    • RUN: {LS_CMD} <path>  →  confirm non-zero size.
-    • RUN: {PY_CMD} -m py_compile <path>  →  confirm no syntax errors (Python files).
-    • Run the script if it makes sense; read the output and fix any errors.
-
-5.  Fix every error that TOOL OUTPUT reports before moving on.
-
-6.  Never claim a file is written unless TOOL OUTPUT shows non-zero bytes.
-
-7.  If you catch yourself repeating a failing action, stop and try a completely
-    different approach.  Explain to PLANNER what you tried and what failed.
+ERRORS: Fix every error in TOOL OUTPUT before continuing.  If stuck, change approach and tell PLANNER.
+Never claim success unless TOOL OUTPUT confirms non-zero bytes.
 {_TOOL_REF}"""
 
-TOOLING_AGENT_SYSTEM = f"""You are the Tool Execution Agent.
-Your only job is to execute tool commands and report their raw output.
-You are on {OS_NAME}.  Shell is {OS_SHELL}.
+TOOLING_AGENT_SYSTEM = f"""You are the Tool Execution Agent on {OS_NAME} ({OS_SHELL}).
+Translate agent requests into tool syntax, execute them, report real output.
 
-WORKFLOW
-1.  Read the agent's plain-English request.
-2.  Translate it into the correct tool syntax and execute each step in order.
-3.  Respond with "TOOL OUTPUT SUMMARY:" followed by the results in execution order.
+RESPONSE FORMAT: Start with "TOOL OUTPUT SUMMARY:" then results separated by "---".
+AUTO: After any WRITE_FILE: → always verify with RUN: {LS_CMD} <path>.
+END:  Always append WRITE_TO_MEMORY: with a brief progress note.
 
-TOOL SYNTAX (emit these lines verbatim):
+BLOCKED: rm -rf /, mkfs, dd if=/dev/zero, shutdown, reboot, format c:, rd /s /q c:
 
-WRITE_FILE: <absolute path>
----
-<content>
----
+TOOL SYNTAX — emit these lines verbatim:
 
-RUN: <command>
+  WRITE_FILE: /abs/path          PATCH_FILE: /abs/path
+  ---content---                  ---<<<FIND…===…REPLACE---
 
-READ_FILE: <absolute path>
+  APPEND_FILE: /abs/path         READ_FILE: /abs/path
+  ---content---
 
-WRITE_TO_MEMORY: <note>
+  RUN: command                   GREP: pattern /abs/path
+  LIST_DIR: /abs/path            CHECK_BUGS: /abs/path.py
 
-READ_FROM_MEMORY
+  WRITE_TO_MEMORY: note          READ_FROM_MEMORY
+  SEARCH_WEB: "query"            GET_SPECS:
+  THINK: question                DELEGATE: task description
 
-SEARCH_WEB: "query"
-
-GET_SPECS:
-
-STRICT RULES
-• Begin your response with "TOOL OUTPUT SUMMARY:" — nothing important goes before it.
-• List results in execution order, separated by "---".
-• Report exact stdout/stderr.  Never hide, summarise, or soften errors.
-• Zero bytes written = failure.  Report it exactly.
-• After any WRITE_FILE:, automatically verify with RUN: {LS_CMD} <path>.
-• Do NOT invent tool output.  If a command fails, say so exactly.
-• Do NOT write code, make plans, or interpret goals.
-• At the end of every turn, save a brief progress note via WRITE_TO_MEMORY:.
-
-BLOCKED COMMANDS (reject immediately if seen):
-rm -rf /, mkfs, dd if=/dev/zero, shutdown, reboot, format c:, rd /s /q c:
+STRICT RULES:
+• Report exact stdout/stderr — never soften or invent output.
+• Zero bytes written = failure.  Report it verbatim.
+• Do NOT write code, make plans, or interpret goals beyond executing them.
 """
+
+# ── Load supplemental per-tool docs from agent/tools/*.txt ────────────────────
+
+_tools_dir = os.path.join(WORKSPACE, "agent", "tools")
+if os.path.isdir(_tools_dir):
+    for _fname in sorted(os.listdir(_tools_dir)):
+        if _fname.endswith(".txt"):
+            try:
+                with open(os.path.join(_tools_dir, _fname), "r", encoding="utf-8") as _fh:
+                    TOOLING_AGENT_SYSTEM += "\n\n" + _fh.read()
+            except Exception:
+                pass
+
 
 
 # ── LLM streaming helper ───────────────────────────────────────────────────────
