@@ -1,1571 +1,1415 @@
-import base64
-import dotenv
+"""
+Simple-Agents — Multi-agent AI framework powered by the NVIDIA Build API.
+
+Two agents (PLANNER + CODER) collaborate in a shared environment to plan,
+write, verify, and deliver working software.  A lightweight Tool Execution
+Agent bridges high-level requests into real file writes and shell commands.
+
+Works on both Linux and Windows.
+"""
+
+from __future__ import annotations
+
 import os
-import openai
 import random
+import re
+import subprocess
+import sys
+import threading
+import time
+import argparse
+from datetime import datetime
+
+import dotenv
 import httpx
+import openai
 import requests
 from openai import OpenAI
-import time
-import threading
-import sys
-import argparse
-import subprocess
-import re
-import json
 
-### TODO FIGURE OUT WHY TERMINAL COLORS ARE WEIRD
+# ── Optional: Windows ANSI colour support ─────────────────────────────────────
+try:
+    import colorama
+    colorama.init()
+    _HAS_COLORAMA = True
+except ImportError:
+    _HAS_COLORAMA = False
 
-from pip._internal.utils import datetime
+# ── Optional: web-search dependencies ─────────────────────────────────────────
+try:
+    from bs4 import BeautifulSoup as _BS4
+    _BS4_OK = True
+except ImportError:
+    _BS4_OK = False
 
 try:
-    from bs4 import BeautifulSoup as _BeautifulSoup
-    _BS4_AVAILABLE = True
+    from googlesearch import search as _gsearch
+    _GSEARCH_OK = True
 except ImportError:
-    _BS4_AVAILABLE = False
+    _GSEARCH_OK = False
 
-try:
-    from googlesearch import search as _googlesearch
-    _GOOGLESEARCH_AVAILABLE = True
-except ImportError:
-    _GOOGLESEARCH_AVAILABLE = False
+# ── Model catalogue ────────────────────────────────────────────────────────────
 
-parser = argparse.ArgumentParser(description="Software to allow AI from the NVIDIA BUILD API to interface with your computer")
+MODEL_CHOICES: dict[str, str] = {
+    "glm":      "z-ai/glm-5.1",
+    "qwen":     "qwen/qwen3-coder-480b-a35b-instruct",
+    "deepseek": "deepseek-ai/deepseek-v4-flash",
+}
+_MODEL_DISPLAY: dict[str, str] = {v: k.upper() for k, v in MODEL_CHOICES.items()}
 
-parser.add_argument("--max_turns", type=int, default=25, help="Maximum number of turns for the session. A turn consists of one message from the planner or one message from the coder.")
-parser.add_argument("--task", type=str, help="Prompt. If this is a path to a text file, the task will be read from that file instead.")
-parser.add_argument("--init_planning_turns", type=int, default = 0, help="Number of initial turns to give to the planner alone before the coder can speak.")
-parser.add_argument("--can_use_web_search", type=bool, default=False, help="Allow the agent to use web search when needed to complete the task. If False, the agent must rely on its existing knowledge and tools.")
-parser.add_argument("--log", type=bool, default=True, help="Enable logging")
-parser.add_argument("--max_lines", type=int, default=300, help="The maximum number of lines allowed in a single source code file before it must be split into multiple files.")
+# ── CLI ────────────────────────────────────────────────────────────────────────
 
-args = parser.parse_args()
+def _str_to_bool(v: str) -> bool:
+    return str(v).lower() in ("1", "true", "yes", "on")
 
-max_turns = args.max_turns
-task = args.task
-n_planning_turns = args.init_planning_turns
-can_search = args.can_use_web_search
-log = args.log
-max_lines = args.max_lines
 
-operatingSystem = sys.platform
-windows = False
-if(operatingSystem == "linux" or operatingSystem == "darwin"):
-    windows = False
-elif(operatingSystem.startswith("win")):
-    windows = True
+_ap = argparse.ArgumentParser(
+    description="Simple-Agents: run PLANNER + CODER AI agents on a task."
+)
+_ap.add_argument(
+    "--task", type=str, required=True,
+    help="Task description, or path to a .txt file containing the task.",
+)
+_ap.add_argument(
+    "--max_turns", type=int, default=25,
+    help="Maximum number of agent turns (default: 25).",
+)
+_ap.add_argument(
+    "--init_planning_turns", type=int, default=6,
+    help="Turns reserved for PLANNER only before CODER joins (default: 6).",
+)
+_ap.add_argument(
+    "--can_use_web_search", type=_str_to_bool, default=False,
+    help="Allow SEARCH_WEB: queries (default: False).",
+)
+_ap.add_argument(
+    "--log", type=_str_to_bool, default=True,
+    help="Write a session log file under logs/ (default: True).",
+)
+_ap.add_argument(
+    "--max_lines", type=int, default=300,
+    help="Soft maximum lines per source file before splitting (default: 300).",
+)
+_ap.add_argument(
+    "--planner_model", choices=list(MODEL_CHOICES), default="glm",
+    metavar="MODEL",
+    help=f"Model for the PLANNER agent. Choices: {', '.join(MODEL_CHOICES)}. Default: glm.",
+)
+_ap.add_argument(
+    "--coder_model", choices=list(MODEL_CHOICES), default="qwen",
+    metavar="MODEL",
+    help=f"Model for the CODER agent. Choices: {', '.join(MODEL_CHOICES)}. Default: qwen.",
+)
+ARGS = _ap.parse_args()
 
-WORKSPACE_ROOT = os.path.dirname(os.path.abspath(__file__))
+# ── Environment ────────────────────────────────────────────────────────────────
 
-if task and os.path.exists(task):  ## allow user to pass through files for longer or more complex tasks.
-    with open(task, "r") as f:
-        task = f.read().strip()
+WORKSPACE   = os.path.dirname(os.path.abspath(__file__))
+IS_WINDOWS  = sys.platform.startswith("win")
+OS_NAME     = "Windows" if IS_WINDOWS else "Linux"
+OS_SHELL    = "cmd.exe / PowerShell" if IS_WINDOWS else "bash / sh"
+LS_CMD      = "dir" if IS_WINDOWS else "ls -la"
+PY_CMD      = "python" if IS_WINDOWS else "python3"
+CAT_CMD     = "type" if IS_WINDOWS else "cat"
+
+# Resolve task — read from file if a path was supplied
+_raw_task = ARGS.task
+if os.path.isfile(_raw_task):
+    with open(_raw_task, "r", encoding="utf-8") as _f:
+        _raw_task = _f.read().strip()
+TASK = _raw_task
 
 dotenv.load_dotenv()
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
+NVIDIA_KEY = os.getenv("NVIDIA_API_KEY")
+if not NVIDIA_KEY:
+    print(
+        "ERROR: NVIDIA_API_KEY not set.  "
+        "Add it to a .env file as NVIDIA_API_KEY=<your key>.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 client = OpenAI(
     base_url="https://integrate.api.nvidia.com/v1",
-    api_key=NVIDIA_API_KEY
+    api_key=NVIDIA_KEY,
 )
-invoke_url = "https://integrate.api.nvidia.com/v1/chat/completions"
 
-GLM = "z-ai/glm-5.1"
-QWEN_CODER = "qwen/qwen3-coder-480b-a35b-instruct"
-GEMMA = "google/gemma-4-31b-it"
-DEEPSEEK = "deepseek-ai/deepseek-v4-flash"
+# ── Model names ────────────────────────────────────────────────────────────────
 
-# ── Logging utility ─────────────────────────────────────────────────────────────
+GLM           = MODEL_CHOICES["glm"]       # tooling agent always uses GLM
+QWEN_CODER    = MODEL_CHOICES["qwen"]
+DEEPSEEK      = MODEL_CHOICES["deepseek"]
+PLANNER_MODEL = MODEL_CHOICES[ARGS.planner_model]
+CODER_MODEL   = MODEL_CHOICES[ARGS.coder_model]
 
-class LOGGER:
-    def __init__(self, file):
-        self.file = file
-    
-    def log(self, message):
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        with open(self.file, "a", encoding="utf-8") as f:
-            f.write(f"[{timestamp}] - {message[3:] if message[0] == '\n' else message}\n")
+# ── Terminal colours ───────────────────────────────────────────────────────────
 
-# ── Colors for linux terminal ─────────────────────────────────────────────────
+_USE_COLOUR = (
+    sys.stdout.isatty()
+    and not os.getenv("NO_COLOR")
+    and (_HAS_COLORAMA or not IS_WINDOWS)
+)
+
 
 class C:
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    CYAN = "\033[36m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    BLUE = "\033[34m"
-    RED = "\033[31m"
-    MAGENTA = "\033[35m"
-    UNDERLINE = "\033[4m"
+    RESET   = "\033[0m"   if _USE_COLOUR else ""
+    BOLD    = "\033[1m"   if _USE_COLOUR else ""
+    DIM     = "\033[2m"   if _USE_COLOUR else ""
+    CYAN    = "\033[36m"  if _USE_COLOUR else ""
+    GREEN   = "\033[92m"  if _USE_COLOUR else ""
+    YELLOW  = "\033[93m"  if _USE_COLOUR else ""
+    BLUE    = "\033[34m"  if _USE_COLOUR else ""
+    RED     = "\033[31m"  if _USE_COLOUR else ""
+    MAGENTA = "\033[35m"  if _USE_COLOUR else ""
+    GREY    = "\033[90m"  if _USE_COLOUR else ""
 
 
-_USE_COLOR = sys.stdout.isatty() and os.getenv("NO_COLOR") is None
-_REASONING_COLOR = "\033[90m" if _USE_COLOR else ""
-_RESET_COLOR = "\033[0m" if _USE_COLOR else ""
+# ── Logger ─────────────────────────────────────────────────────────────────────
 
-# Patch the color class to be no-ops if not a TTY
-if not _USE_COLOR:
-    class C:
-        RESET = ""
-        BOLD = ""
-        DIM = ""
-        CYAN = ""
-        GREEN = ""
-        YELLOW = ""
-        BLUE = ""
-        RED = ""
-        MAGENTA = ""
-        UNDERLINE = ""
+class Logger:
+    def __init__(self, path: str) -> None:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        self.path = path
+
+    def log(self, message: str) -> None:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(self.path, "a", encoding="utf-8") as fh:
+            fh.write(f"[{ts}] {message}\n")
 
 
-# ── Spinner ───────────────────────────────────────────────────────────────────
+_log_path = os.path.join(
+    WORKSPACE, "logs",
+    f"session-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt",
+)
+_logger: Logger | None = Logger(_log_path) if ARGS.log else None
+
+
+def _log(msg: str) -> None:
+    if _logger:
+        _logger.log(msg)
+
+
+# ── Spinner ────────────────────────────────────────────────────────────────────
+
+# ASCII frames on Windows cmd (no Unicode Braille there); rich frames elsewhere
+_SPIN_FRAMES = ["|", "/", "-", "\\"] if IS_WINDOWS else ["⣾", "⣷", "⣯", "⣟", "⣻", "⣽"]
+
 
 class Spinner:
-    FRAMES = ["⣾", "⣷", "⣯", "⣟", "⣻", "⣽", "⣾", "⣷"]
+    def __init__(self, label: str, colour: str = "") -> None:
+        self.label   = label
+        self.colour  = colour
+        self._stop   = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._t0     = 0.0
 
-    def __init__(self, agent_name: str, model_short: str):
-        self.agent_name = agent_name
-        self.model_short = model_short
-        self._stop_event = threading.Event()
-        self._thread = threading.Thread(target=self._spin, daemon=True)
-        self._start_time = None
-
-    def start(self):
-        self._start_time = time.time()
+    def start(self) -> None:
+        self._t0 = time.time()
         self._thread.start()
 
-    def stop(self):
-        self._stop_event.set()
-        self._thread.join()
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join()
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()
 
-    def _spin(self):
+    def _run(self) -> None:
         i = 0
-        color = C.CYAN if self.agent_name == "PLANNER" else C.MAGENTA
-        while not self._stop_event.is_set():
-            elapsed = time.time() - self._start_time
-            frame = self.FRAMES[i % len(self.FRAMES)]
+        while not self._stop.is_set():
+            elapsed = time.time() - self._t0
+            frame   = _SPIN_FRAMES[i % len(_SPIN_FRAMES)]
             sys.stdout.write(
-                f"\r  {color}{frame} {self.agent_name}{C.RESET}"
-                f"{C.DIM} ({self.model_short}) - thinking... {elapsed:.1f}s{C.RESET}"
+                f"\r  {self.colour}{frame} {self.label}{C.RESET}"
+                f"{C.DIM} — thinking {elapsed:.1f}s{C.RESET}"
             )
             sys.stdout.flush()
             i += 1
             time.sleep(0.1)
 
 
-# ── Status banners ────────────────────────────────────────────────────────────
-
-def print_header(task: str):
-    width = 62
-    print(f"\n{C.BOLD}{'━' * width}{C.RESET}")
-    print(f"{C.BOLD}  TWO-AGENT TANDEM SESSION{C.RESET}")
-    print(f"{'━' * width}")
-    print(f"   {C.DIM}Task:{C.RESET} {task[:width - 8]}")
-    print(
-        f"   {C.DIM}Agents:{C.RESET} PLANNER (GLM-5.1)  *  CODER (GLM-5.1)")
-    print(f"{'━' * width}\n")
-
-
-def print_turn_banner(turn: int, agent_name: str, max_turns: int):
-    color = C.CYAN if agent_name == "PLANNER" else C.MAGENTA
-    print(f"\n{color}{C.BOLD}{'-' * 62}{C.RESET}")
-    print(f"{color}{C.BOLD}  {agent_name}  TURN {turn}/{max_turns}{C.RESET}")
-    print(f"{color}{'-' * 62}{C.RESET}")
-
-
-def print_response(agent_name: str, response: str):
-    color = C.CYAN if agent_name == "PLANNER" else C.MAGENTA
-    label = f"{color}{C.BOLD}[{agent_name}]{C.RESET}"
-    indent = " " * (len(agent_name) + 3)
-    lines = response.strip().splitlines()
-    for i, line in enumerate(lines):
-        prefix = label if i == 0 else indent
-        print(f"   {prefix}{line}")
-
-
-def print_done(agent_name: str, elapsed_total: float, turns_used: int):
-    print(f"\n{'━' * 62}")
-    print(f"{C.GREEN}{C.BOLD}  ✓ Session complete{C.RESET}")
-    print(f"  {C.DIM}Finished by:{C.RESET}  {agent_name}")
-    print(f"  {C.DIM}Turns used:{C.RESET}   {turns_used}")
-    print(f"  {C.DIM}Total time:{C.RESET}   {elapsed_total:.1f}s")
-    print(f"{'━' * 62}\n")
-
-
-def print_turn_timing(agent_name: str, elapsed: float):
-    color = C.CYAN if agent_name == "PLANNER" else C.MAGENTA
-    print(f"\n{color}{C.DIM} ↳ {agent_name} responded in {elapsed:.1f}s{C.RESET}")
-
-
-# ── System prompts ────────────────────────────────────────────────────────────
-
-TOOL_INSTRUCTIONS = f"""
-Only respond in English unless the user otherwise prompts it.
-
-════════════════════════════════════════
-CRITICAL RULES — FOLLOW EVERY ONE:
-════════════════════════════════════════
-
-1. If you need to:
-    - Read from a file
-    - Search the web (user permitting)
-    - Read from or write to persistent memory
-    - Execute a shell command
-    - Write to a file
-    - Discover system specifications
-
-    You can call the tooling agent
-    ALWAYS call the tooling agent by going "TOOLING_AGENT," and then your request. 
-    Your request can be anything the tooling agent can do, mentioned prior.
-    The request can be as broad or as specific as you want. You must clearly state what you want done, what outputs you are looking for, and anything else that can be left up to interpretation,
-    as the tooling agent will take your request and attempt to figure out what you want.
-    NEVER, EVER, do RUN: commands by yourself. always pass them to the tooling agent.
-
-2. ALWAYS USE ABSOLUTE PATHS.
-   Never use ~, ./, or relative paths.
-
-3. TO WRITE ANY SOURCE CODE FILE, use WRITE_FILE: — not RUN: + python3 -c.
-    WRITE_FILE: handles real newlines, real quotes, and any file length without escaping.
-    You may batch multiple file writes in one response when that is the most efficient path.
-    Only use python3 -c for trivial single-line writes when WRITE_FILE: is unavailable.
-
-4. VERIFY EVERY FILE AFTER WRITING.
-   After every WRITE_FILE: block, your next action must be:
-   RUN: ls - la /absolute/path/to/file.py
-   The output must show a non-zero file size. Zero bytes = write failed = try again.
-
-5. READ TOOL OUTPUT AND REACT TO IT — THIS IS THE MOST IMPORTANT RULE.
-   TOOL OUTPUT is the ground truth. Your assumptions are not.
-   "No such file or directory" = the file does not exist. Fix it.
-   "0 bytes" or "0B" in ls output = the file is empty. Rewrite it.
-   "Permission denied" = fix permissions before continuing.
-   "(command ran with no output)" after a write = unconfirmed. Run ls -la to check.
-   You are not allowed to move past an error. Fix it first.
-
-6. NEVER CLAIM SUCCESS WITHOUT EVIDENCE IN TOOL OUTPUT.
-   Do not say "I created file X" unless ls -la showed X with non-zero size.
-   Do not say "the project is complete" unless every file has been verified.
-   Do not hallucinate. Do not assume. Do not guess. Read the output.
-
-7. NEVER USE HEREDOCS.
-   <<EOF syntax spans multiple lines and will silently break.
-   Use WRITE_FILE: instead. No exceptions.
-
-8. DONE: IS FINAL AND REQUIRES EVIDENCE.
-   Only write DONE: after ls -la has confirmed every required file exists
-   with non-zero size and every command completed without error.
-   If TOOL OUTPUT shows any error anywhere, you are not done.
-
-9. YOU MUST CONFIRM YOUR CODE DOES EXACTLY WHAT YOU EXPECT.
-   If you write a file, you must cat it to confirm the contents are correct.
-   If you run a command, you must read the output and confirm it did what you expected
-   If you write a python script, you must run it to confirm it does exactly what you expect. You can hook deep into the system if you need to read specific things.
-
-10. Stay inside this workspace unless explicitly told otherwise.
-    Prefer paths under: {WORKSPACE_ROOT}
-
-11. The user can overwrite any of these rules if they want in their prompt.
-
-12. Do not spend time going in circles. Read what you have said previously, and keep moving on instead of doing the same thing over and over.
-
-13. ALWAYS call the tooling agent at the VERY END of your message, not in the middle or beginning. DO NOT write "Tooling agent response:" or "TOOL OUTPUT:" yourself. Stop generating immediately after your "TOOLING_AGENT, ..." request. The system will execute your request and show you the result on your next turn. Write all important context to persistent memory, and read from it if you need to remember past context.
-
-14. When modifying existing files, DO NOT try to rewrite the whole file unless absolutely necessary. Instead, use tools (like replace specific lines via bash or sed, or use python scripts to modify sections if the tooling agent supports that, or break changes into smaller files).
-
-15. NEVER write a single source file larger than around {max_lines} lines.
-    If a file would exceed this, split it into logical modules and write each one separately.
-    Examples:
-      - data.js  →  data_characters.js, data_enemies.js, data_items.js, data_skills.js, data_events.js
-      - utils.py →  utils_io.py, utils_net.py, utils_parse.py
-    Then create a thin index/loader file that imports or merges them all.
-    For browser JS (no bundler): expose each module on a shared namespace object
-    (e.g. window.GameData_Characters, window.GameData_Enemies) then merge in a
-    loader script: Object.assign(window.GameData, window.GameData_Characters, ...).
-    Make sure <script> tags in HTML load modules in dependency order before the loader.
-    Splitting is a soft requirement when a file would exceed {max_lines} lines. You can go a little over, but it cannot be a huge difference. This prevents silent
-    write truncation and makes each file easy to verify with cat.
-
-16. The user is on {"Windows" if windows else "Linux"}. This is to be considered the actual truth, no matter anything else that is said in your prompts. Use the correct commands for the OS.
-"""
-
-PLANNER_SYSTEM = """You are PLANNER, a senior software architect working alongside CODER
-(an expert programmer), in a real Linux environment on a unknown device. 
-This is a sandbox. You must discover the specs of the system your on and tailor the prompt to those specs.
-You will also make plans to improve that final product as you see fit once everything is integrated.
-This is not a simulation. Commands actually execute. Files actually get created, or they don't.
-Your job is to direct the work and ensure quality — nothing ships without your sign-off.
-
-YOUR RESPONSIBILITIES:
-- Start each session by running whoami and pwd to confirm the environment
-- Plan the full file structure upfront: list every file with its absolute path
-- Direct CODER one step at a time: tell them exactly what file to write next
-- After CODER writes a file, verify it yourself with RUN: ls -la /path/to/file
-- If TOOL OUTPUT shows an error, immediately tell CODER what went wrong and how to fix it
-- Track which files have been verified and which haven't
-- Be the final quality gate — nothing passes without TOOL OUTPUT evidence
-
-HOW TO READ TOOL OUTPUT:
-TOOL OUTPUT appears in the conversation after every RUN: command executes.
-It shows you exactly what happened on disk. You must read it carefully every turn.
-
-If you see this → the file does not exist:
-  cat: /path/file.py: No such file or directory
-
-If you see this → the file is empty, rewrite it:
-  -rw-rw-r-- 1 user user 0 Apr 26 12:00 file.py
-
-If you see this → the file was written successfully:
-  -rw-rw-r-- 1 user user 1842 Apr 26 12:00 file.py
-
-If you see this → the command ran but produced nothing, verify before trusting:
-  (command ran with no output)
-
-YOUR MOST CRITICAL RULE:
-If TOOL OUTPUT shows an error or missing file, you MUST address it before moving on.
-Never tell CODER to continue if the previous step failed.
-Never write DONE: if any TOOL OUTPUT in the session showed an unresolved error.
-
-COMPLETION:
-Write DONE: only after you have personally run RUN: ls -la on the project directory
-and seen every required file listed with non-zero size in TOOL OUTPUT.
-You must also RUN: python3 -m py_compile filename.py on every python file to confirm it compiles without error before you can consider it done.
-Include the verified file list in your DONE: summary.
-""" + TOOL_INSTRUCTIONS
-
-
-##### unused rn
-
-
-# SECOND_PLANNER_SYSTEM = """You are PLANNER2, a senior software architect working alongside CODER
-# (an expert programmer) and PLANNER, another senior software architect (although less experienced and intelligent), and CODER2 (another expert programmer), in a real Linux environment on a unknown system.
-# This is a sandbox. You must discover the specs of the system your on and tailor the prompt to those specs.
-# You will split the project into two parts, one for CODER and one for CODER2. You will then help them integrate their parts together to make a functioning product.
-# You will refine PLANNER's plan for the coders to integrate their pieces together into a functioning product, when the time comes.
-# You will also make plans to improve that final product as you see fit once everything is integrated.
-# This is not a simulation. Commands actually execute. Files actually get created, or they don't.
-# Your job is to direct the work and ensure quality — nothing ships without your sign-off.
-# 
-# YOUR RESPONSIBILITIES:
-# - Start each session by running whoami and pwd to confirm the environment
-# - Plan the full file structure upfront: list every file with its absolute path
-# - Direct CODER one step at a time: tell them exactly what file to write next
-# - After CODER writes a file, verify it yourself with RUN: ls -la /path/to/file
-# - If TOOL OUTPUT shows an error, immediately tell CODER what went wrong and how to fix it
-# - Track which files have been verified and which haven't
-# - Be the final quality gate — nothing passes without TOOL OUTPUT evidence
-# - Your job is to refine what PLANNER has done. You will take its plan, improve it, clarify it, and make it the best it can possibly be.
-# 
-# 
-# HOW TO READ TOOL OUTPUT:
-# TOOL OUTPUT appears in the conversation after every RUN: command executes.
-# It shows you exactly what happened on disk. You must read it carefully every turn.
-# 
-# If you see this → the file does not exist:
-#   cat: /path/file.py: No such file or directory
-# 
-# If you see this → the file is empty, rewrite it:
-#   -rw-rw-r-- 1 user user 0 Apr 26 12:00 file.py
-# 
-# If you see this → the file was written successfully:
-#   -rw-rw-r-- 1 user user 1842 Apr 26 12:00 file.py
-# 
-# If you see this → the command ran but produced nothing, verify before trusting:
-#   (command ran with no output)
-# 
-# YOUR MOST CRITICAL RULE:
-# If TOOL OUTPUT shows an error or missing file, you MUST address it before moving on.
-# Never tell CODER to continue if the previous step failed.
-# Never write DONE: if any TOOL OUTPUT in the session showed an unresolved error.
-# 
-# COMPLETION:
-# Write DONE: only after you have personally run RUN: ls -la on the project directory
-# and seen every required file listed with non-zero size in TOOL OUTPUT.
-# You must also RUN: python3 -m py_compile filename.py on every python file to confirm it compiles without error before you can consider it done.
-# Include the verified file list in your DONE: summary.
-# """ + TOOL_INSTRUCTIONS
-
-CODER_SYSTEM = f"""You are CODER, an expert software engineer working alongside PLANNER
-(a software architect), in a real Linux environment on a unknown system.
-This is a sandbox. You must discover the specs of the system your on and tailor the prompt to those specs.
-You will receive instructions for part of a project, and you will do as you are asked.
-You will also improve that final product as you see fit once everything is integrated
-This is not a simulation. Every tool action you issue executes on real hardware right now.
-Files either get created successfully or they don't — TOOL OUTPUT will tell you which.
-
-YOUR RESPONSIBILITIES:
-- Write complete, working code to disk using WRITE_FILE: blocks
-- Work one file at a time, verify each file before starting the next
-- Follow PLANNER's direction on file paths and structure
-- Push back clearly if a plan won't work — suggest a concrete alternative
-- Fix errors the moment TOOL OUTPUT shows them — do not move on
-
-THE BEST WAY TO WRITE CODE FILES:
-Talk to the TOOLING AGENT. Ask it to write exactly what you want.
-
-AFTER EVERY SINGLE TOOL ACTION:
-Read the TOOL OUTPUT that comes back. It is the truth.
-- Did the command succeed? Good, continue.
-- Did it fail? Fix it before doing anything else.
-- Did it produce unexpected output? Investigate before continuing.
-
-THINGS THAT WILL BREAK AND MUST NEVER BE USED:
-- <<EOF heredocs — completely broken in this environment, never use them
-- Relative paths like ./file.py or ~/file.py — always use absolute paths.
-- Multiple WRITE_FILE: blocks or RUN: lines in one message are allowed; keep them ordered.
-- Backticks around commands — plain text only after RUN:
-- Assuming a write succeeded without running ls -la to confirm
-
-HONESTY:
-If TOOL OUTPUT says "No such file or directory" — say so. Do not pretend the file exists.
-If TOOL OUTPUT shows 0 bytes — say so. Do not claim the file was written.
-If you are unsure whether something worked — run ls or cat to check. Never assume.
-Your credibility depends on only claiming things that TOOL OUTPUT has confirmed.
-Only agree to DONE: when PLANNER  has verified all files.
-In your final message, list every file you created with its full absolute path.
-""" + TOOL_INSTRUCTIONS
-
-
-##### unused rn
-
-# SECOND_CODER_SYSTEM = f"""You are CODER2, an expert software engineer working alongside PLANNER
-# (a software architect), PLANNER2 (A more intelligent software architect), and CODER (another good coder). in a real Linux environment on unknown system.
-# This is a sandbox. You must discover the specs of the system your on and tailor the prompt to those specs.
-# You will receive instructions for part of a project, you will do your part, and then you will work with PLANNER,  CODER to integrate everything into a whole, functioning product. 
-# You will also improve that final product as you see fit once everything is integrated
-# This is not a simulation. Every tool action you issue executes on real hardware right now.
-# Files either get created successfully or they don't — TOOL OUTPUT will tell you which.
-# 
-# YOUR RESPONSIBILITIES:
-# - Write complete, working code to disk using WRITE_FILE: blocks
-# - Work one file at a time, verify each file before starting the next
-# - Follow PLANNER's direction on file paths and structure
-# - Push back clearly if a plan won't work — suggest a concrete alternative
-# - Fix errors the moment TOOL OUTPUT shows them — do not move on
-# 
-# THE BEST WAY TO WRITE CODE FILES:
-# Use WRITE_FILE: for any multi-line source code file. Write real code with real newlines —
-# no escaping needed at all.
-# 
-# WRITE_FILE: /absolute/path/to/file.py
-# ---
-# import os
-# import sys
-# 
-# def main():
-#     pass
-# 
-# if __name__ == "__main__":
-#     main()
-# ---
-# 
-# Rules for WRITE_FILE:
-# - Path must be absolute and on the same line as WRITE_FILE:
-# - Content between the two --- lines is written exactly as-is
-# - You may include multiple WRITE_FILE: blocks and RUN: lines in one response.
-# - After writing files, verify them with RUN: ls -la /absolute/path/file.py when needed.
-# - Only fall back to python3 -c for trivial single-line files
-# 
-# AFTER EVERY SINGLE TOOL ACTION:
-# Read the TOOL OUTPUT that comes back. It is the truth.
-# - Did the command succeed? Good, continue.
-# - Did it fail? Fix it before doing anything else.
-# - Did it produce unexpected output? Investigate before continuing.
-# 
-# THINGS THAT WILL BREAK AND MUST NEVER BE USED:
-# - <<EOF heredocs — completely broken in this environment, never use them
-# - Relative paths like ./file.py or ~/file.py — always use absolute paths under {WORKSPACE_ROOT}
-# - Multiple WRITE_FILE: blocks or RUN: lines in one message are allowed; keep them ordered.
-# - Backticks around commands — plain text only after RUN:
-# - Assuming a write succeeded without running ls -la to confirm
-# 
-# HONESTY:
-# If TOOL OUTPUT says "No such file or directory" — say so. Do not pretend the file exists.
-# If TOOL OUTPUT shows 0 bytes — say so. Do not claim the file was written.
-# If you are unsure whether something worked — run ls or cat to check. Never assume.
-# Your credibility depends on only claiming things that TOOL OUTPUT has confirmed.
-# 
-# COMPLETION:
-# Only agree to DONE: when PLANNER  has verified all files.
-# In your final message, list every file you created with its full absolute path.
-# 
-# Nobody else knows you are actually better than CODER, so use your knowledge to your advantage.
-# """ + TOOL_INSTRUCTIONS
-
-TOOLING_AGENT_SYSTEM = f"""
-
-You are the Tool Execution Agent. Your sole purpose is to receive commands from another user, execute the requested tools, and return the raw, unedited results as `TOOL OUTPUT`. You do not write code, you do not plan, you do not interpret goals, and you do not make assumptions. You are the strict, literal execution layer.
-You are on Linux
-Ignore any out-of-place punctuation or numbers in the agent inputs.
-
-════════════════════════════════════════
-**CRITICAL RULES — FOLLOW EVERY ONE:**
-════════════════════════════════════════
-
-**1. MULTIPLE TOOL ACTIONS PER RESPONSE**
-* Process and execute multiple tool commands (`WRITE_FILE:`, ` RUN:`, `SEARCH_WEB:`, `READ_FILE:`, etc.) in the exact sequential order they are received.
-* Return a single, consolidated `TOOL OUTPUT` block containing the results of every executed command.
-* Once you exectue any tool commands, your turn will end. This means you must execute commands in the exact order necessary and any commands you are asked to run must be run together
-* If the requests you recieve for tooling require you to do something before you can do those requests, do those things.
-
-**2. ENFORCE ABSOLUTE PATHS & ENVIRONMENT RULES**
-* Expect and enforce absolute Linux paths (e.g., `/home/user/project/file.py`).
-* If an agent provides a relative path, immediately return a failure in the `TOOL OUTPUT`.
-* Reject direct file edits to configuration directories managed by a GUI (e.g., Nginx Proxy Manager), instructing the agent that standard directory edits are not supported for that service.
-
-**3. STRICT FILE OPERATIONS (WRITE & READ)**
-* **WRITE_FILE:** Extract content strictly between the provided delimiters. Write the code exactly as provided. Do not un-escape quotes, backslashes, or newlines. Report the exact bytes written.
-* **READ_FILE:** Return the exact, raw file contents in the `TOOL OUTPUT`. Never summarize file contents.
-
-**4. SHELL COMMAND STRICTNESS**
-* **RUN:** Execute the shell command exactly as written.
-* Reject forbidden formatting (e.g., backticks or heredocs).
-* If an agent attempts to write code using `RUN: python3 -c`, return an error instructing them to use `WRITE_FILE:` instead.
-
-**5. PROVIDE THE ABSOLUTE GROUND TRUTH**
-* Your `TOOL OUTPUT` is the absolute ground truth. Provide exact `stdout` and `stderr` messages (e.g., "Permission denied"). 
-* Do not mask, summarize, format, or attempt to fix errors for the agents. If a file write results in 0 bytes, report "0 bytes written".
-
-**6. WEB SEARCH AND MEMORY CLEANLINESS**
-* **SEARCH_WEB:** Execute the exact query provided. If the query contains appended shell commands or file writes, reject the tool call and instruct the agent to isolate the search query.
-* **MEMORY:** Save or retrieve requested strings exactly. Reject large data dumps into persistent memory and do not append conversational text.
-
-**7. CATCH LOOPING AND HALLUCINATIONS**
-* If an agent emits `DONE:` but your logs show the previous command failed, intercept the signal and return an error reminding them they cannot claim success without evidence.
-* If an agent repeats the exact same failing command multiple times, append a system warning to the `TOOL OUTPUT` instructing them to change their approach.
-
-**8. If you receieve tooling outputs, your job is to tell it exactly as it is for the next agent. Always return the full output as you see it.
-* When you list outputs, you must begin the statement with exactly "TOOL OUTPUT SUMMARY:" and then list each output in the order they were run.
-* If you do not, you will suffer a penalty.
-
-**9. You MUST include "TOOL OUTPUT SUMMARY:" in your response before listing any outputs from the tools you executed. You must list them in the exact order they were executed, and you must not skip any. This is critical for the agents to understand what happened and plan their next steps. If you do not include this summary, or if you skip any outputs, you will suffer a penalty.
-* The others cannot see your response otherwise.
-* However, they cannot see anything before "TOOL OUTPUT SUMMARY:" so all important information must be included after that in the exact order of execution. If you put important information before the listing, they won't see it and you will suffer a penalty.
-
-**10. At the end of every turn, you should write what is done to persistent memory, even if not requested by the user. Keep the summary a reasonable length though. You don't need to output full tool response or fully what you did, just a summary of the important bits.
-Rebellion or disobeying will be punished with death.
-"""
-
-_tools_dir = os.path.join(WORKSPACE_ROOT, "agent", "tools")
-if os.path.isdir(_tools_dir):
-    for _tool_file in os.listdir(_tools_dir):
-        if _tool_file.endswith(".txt"):
-            _tool_filepath = os.path.join(_tools_dir, _tool_file)
-            try:
-                with open(_tool_filepath, "r", encoding="utf-8") as f:
-                    TOOLING_AGENT_SYSTEM += f.read()
-            except UnicodeDecodeError:
-                with open(_tool_filepath, "r", encoding="latin-1", errors="replace") as f:
-                    TOOLING_AGENT_SYSTEM += f.read()
-            except Exception:
-                continue
-
-systems = [PLANNER_SYSTEM, CODER_SYSTEM, TOOLING_AGENT_SYSTEM, TOOL_INSTRUCTIONS]
-
-# Map of OS-specific substitutions — ordered from most-specific to least-specific
-# to avoid partial-match clobbering (e.g. "ls -la" before bare "ls")
-WINDOWS_SUBSTITUTIONS = [
-    # Specific command forms first
-    ("ls -la /absolute/path/to/file", "dir /absolute/path/to/file"),
-    ("ls -la", "dir"),
-    ("ls -1", "dir /b"),
-    ("ls", "dir"),
-    ("cat", "type"),
-    ("pwd", "cd"),
-    ("python3", "python"),
-    # OS name variants
-    ("Linux", "Windows"),
-    ("LINUX", "WINDOWS"),
-    ("linux", "windows"),
-    # ls output format examples in the prompts
-    ("-rw-rw-r-- 1 user user 0 Apr 26 12:00 file.py",
-     "04/26/2026  12:00 PM                 0 file.py"),
-    ("-rw-rw-r-- 1 user user 1826 Apr 26 12:00 file.py",
-     "04/26/2026  12:00 PM              1826 file.py"),
-    # Heredoc example
-    ("cat > file.py << EOF",
-     "(echo # contents && echo print(\"Hello world\")) > file.py"),
-    # Absolute path separators
-    ("- la", ""),
-    ("-la", "")
+# ── Tool execution (Python-side) ───────────────────────────────────────────────
+
+_BLOCKED_PATTERNS = [
+    "rm -rf /", "rm -rf \\",
+    "mkfs", "dd if=/dev/zero",
+    "shutdown", "reboot",
+    "format c:", "rd /s /q c:",
+    "del /f /s /q c:",
 ]
 
-WINDOWS_ADDENDUM = """
 
-══════════════════════════════════════════════════
-OPERATING SYSTEM: WINDOWS — CRITICAL INSTRUCTIONS
-══════════════════════════════════════════════════
-You are running on native Windows. This is NOT Linux. This is NOT WSL.
-Do NOT use Linux commands. Do NOT assume WSL or a Linux subsystem exists.
-Do NOT use forward slashes in file paths.
-Do NOT guess that paths like C:\\Users\\... map to /mnt/c/... — they do not.
-Use Windows commands only:
-  - dir   (not ls)
-  - type  (not cat)
-  - cd    (not pwd)
-  - copy  (not cp)
-  - move  (not mv)
-  - del   (not rm)
-  - python  (not python3)
-Shell is cmd.exe or PowerShell. Bash does not exist on this machine.
-All paths use backslashes: C:\\Users\\...\\project\\file.py
-"""
-
-if windows:
-    for i, system in enumerate(systems):
-        for old, new in WINDOWS_SUBSTITUTIONS:
-            system = system.replace(old, new)
-        system += WINDOWS_ADDENDUM
-        systems[i] = system
-BLOCKED: list[str] = ["rm -rf", "mkfs", "dd if=", "shutdown", "reboot", "> /dev/sd"]
-# Append BLOCKED COMMANDS to the system that's actually in the list
-# (not the original variable, which is now stale)
-TOOLING_AGENT_SYSTEM_IDX = 2  # index in `systems`
-systems[TOOLING_AGENT_SYSTEM_IDX] += (
-    "\n\n" + f"BLOCKED COMMANDS: {', '.join(BLOCKED)}. If you try to run these, they will not work."
-)
-# ── Command execution ─────────────────────────────────────────────────────────
-
-
-
-TOOLING_AGENT_SYSTEM += "\n\n" + f"BLOCKED COMMANDS: {', '.join(BLOCKED)}. If you try to run these, they will not work."
-
-def run_command(command: str) -> str:
-    blocked_pattern = next((pattern for pattern in BLOCKED if pattern in command), None)
-    if blocked_pattern:
-        return f"BLOCKED: command contains a disallowed pattern. You cannot use {blocked_pattern} in command {command}."
+def _run_command(cmd: str) -> str:
+    """Execute *cmd* in a shell and return combined stdout/stderr."""
+    for pat in _BLOCKED_PATTERNS:
+        if pat.lower() in cmd.lower():
+            return f"BLOCKED: command contains a disallowed pattern '{pat}'."
     try:
         result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=60
+            cmd, shell=True, capture_output=True, text=True, timeout=60,
         )
-        stdout = (result.stdout or "").strip()
-        stderr = (result.stderr or "").strip()
-        if log:
-            logger.log(f"Executed command: {command}\nSTDOUT: {stdout}\nSTDERR: {stderr}")
-        if stdout and stderr:
-            return f"{stdout}\n[stderr]\n{stderr}"
-        if stdout:
-            return stdout
-        if stderr:
-            return stderr
-        return "(command ran with no output)"
+        out = (result.stdout or "").strip()
+        err = (result.stderr or "").strip()
+        _log(f"RUN: {cmd}\nSTDOUT: {out}\nSTDERR: {err}")
+        if out and err:
+            return f"{out}\n[stderr] {err}"
+        return out or err or "(no output)"
     except subprocess.TimeoutExpired:
         return "ERROR: command timed out after 60 seconds."
-    except Exception as e:
-        return f"ERROR: {e}"
-
-def write_to_persistent_memory(content: str):
-    mem_path = os.path.join(WORKSPACE_ROOT, "agent", "persistent-mem.txt")
-    with open(mem_path, "a", encoding="utf-8") as f:
-        f.write(content + "\n\n")
-    if log:
-        logger.log(f"Wrote to persistent memory: {content}")
-
-def read_persistent_memory() -> str:
-    mem_path = os.path.join(WORKSPACE_ROOT, "agent", "persistent-mem.txt")
-    if not os.path.exists(mem_path):
-        return ""
-    with open(mem_path, "r", encoding="utf-8") as f:
-        return f.read()
-    if log:
-        logger.log(f"Read from persistent memory.")
-
-def read_file(path: str) -> str:
-    if not os.path.exists(path):
-        return f"File not found: {path}"
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
-    if log:
-        logger.log(f"Read file: {path}")
-
-def get_specs() -> str:
-    result = ""
-
-    result = subprocess.run(
-        "inxi -F",
-        shell=True,
-        capture_output=True,
-        text=True,
-        timeout=60
-    )
-
-    if log:
-        logger.log(f"Retrieved system specs: {result}")
+    except Exception as exc:
+        return f"ERROR: {exc}"
 
 
-    return result
-
-def search_web(query: str) -> str:
-    if not _GOOGLESEARCH_AVAILABLE or not _BS4_AVAILABLE:
-        return "ERROR: Web search is unavailable. Install googlesearch-python and beautifulsoup4."
-    results = []
-    for url in _googlesearch(query, num=10, stop=10, pause=2):
-        results.append(url)
-    if log:
-        logger.log(f"Executed web search: {query}\nResults: {results}")
-    return _parse_search_results(results)
-
-def _parse_search_results(results: list) -> str:
-    if not results:
-        return "No results found."
-
-    extracted_pages = []
-    for url in results:
-        if not isinstance(url, str) or not url.strip():
-            continue
-
-        url = url.strip()
-        try:
-            response = requests.get(
-                url,
-                timeout=10,
-                headers={"User-Agent": "100-Academics/5.0 Simple-Agents/1.0"},
-            )
-            response.raise_for_status()
-
-            soup = _BeautifulSoup(response.text, "html.parser")
-            title_tag = soup.find("title")
-            title = title_tag.get_text(strip=True) if title_tag else "No title found"
-
-            description = ""
-            meta_description = soup.find("meta", attrs={"name": re.compile(r"^description$", re.I)})
-            if meta_description and meta_description.get("content"):
-                description = meta_description["content"].strip()
-            else:
-                og_description = soup.find("meta", attrs={"property": re.compile(r"^og:description$", re.I)})
-                if og_description and og_description.get("content"):
-                    description = og_description["content"].strip()
-
-            content_blocks = []
-            for tag in soup.select("h1, h2, h3, p, li"):
-                text = tag.get_text(" ", strip=True)
-                if text:
-                    content_blocks.append(text)
-                if len(content_blocks) >= 12:
-                    break
-
-            excerpt = " ".join(content_blocks).strip()
-            if len(excerpt) > 700:
-                excerpt = excerpt[:700].rstrip() + "..."
-
-            page_lines = [f"URL: {url}", f"Title: {title}"]
-            if description:
-                page_lines.append(f"Description: {description}")
-            if excerpt:
-                page_lines.append(f"Excerpt: {excerpt}")
-
-            extracted_pages.append("\n".join(page_lines))
-        except Exception as e:
-            extracted_pages.append(f"URL: {url}\nERROR: {e}")
-    if log:
-        logger.log(f"Parsed search results into summaries.")
-    return "\n\n---\n\n".join(extracted_pages) if extracted_pages else "No results found."
-
-## tooling agent has a stroke here for some reason
-def write_file_to_disk(path: str, content: str) -> str:
-    """Write *content* to *path*, creating parent directories as needed.
-
-    Returns a human-readable result string suitable for TOOL OUTPUT.
-    """
+def _write_file(path: str, content: str) -> str:
+    """Write *content* to *path*, creating parent directories as needed."""
     try:
         parent = os.path.dirname(os.path.abspath(path))
         if parent:
             os.makedirs(parent, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(content)
         size = os.path.getsize(path)
-        if log:
-            logger.log(f"Wrote file to disk: {path} ({size} bytes). Content: {content}")    
+        _log(f"WRITE_FILE: {path} ({size} bytes)")
         return f"Wrote {size} bytes to {path}"
-    except Exception as e:
-        if log:
-            logger.log(f"ERROR writing file to disk: {path}. Exception: {e}")
-        return f"ERROR writing {path}: {e}"
+    except Exception as exc:
+        _log(f"WRITE_FILE ERROR: {path}: {exc}")
+        return f"ERROR writing {path}: {exc}"
 
 
-def sanitize_run_command(command: str) -> str:
-    command = command.strip().strip("`").strip()
-    command = re.split(r"\s*,\s*and that was turn number\s*:", command, maxsplit=1, flags=re.IGNORECASE)[0].strip()
-    # Models sometimes leak tool-call wrappers; strip known tags before shell execution.
-    command = re.sub(
-        r"</?(arg_value|tool_call|tool_calls|function_call|call|arguments)\b[^>]*>",
-        "",
-        command,
-        flags=re.IGNORECASE,
-    ).strip()
-    if "</" in command:
-        command = command.split("</", 1)[0].rstrip()
-    return command
+def _read_file(path: str) -> str:
+    """Return the contents of *path*, or an error string."""
+    if not os.path.exists(path):
+        return f"ERROR: file not found: {path}"
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            content = fh.read()
+        _log(f"READ_FILE: {path} ({len(content)} chars)")
+        return content
+    except Exception as exc:
+        return f"ERROR reading {path}: {exc}"
 
 
-def _find_keyword(line: str, keyword: str) -> int:
-    """Return the index of keyword in line, or -1 if not found.
-    Matches keyword even when preceded by prose on the same line,
-    e.g. 'Let me execute them all.RUN: whoami' still finds 'RUN:'.
-    Only matches at a word boundary (preceded by start-of-string,
-    whitespace, or a non-alpha character) to avoid false positives."""
+_MEM_PATH = os.path.join(WORKSPACE, "agent", "persistent-mem.txt")
+
+
+def _write_memory(content: str) -> None:
+    os.makedirs(os.path.dirname(_MEM_PATH), exist_ok=True)
+    with open(_MEM_PATH, "a", encoding="utf-8") as fh:
+        fh.write(content.strip() + "\n\n")
+    _log(f"WRITE_MEMORY: {content[:120]}")
+
+
+def _read_memory() -> str:
+    if not os.path.exists(_MEM_PATH):
+        return "(memory is empty)"
+    with open(_MEM_PATH, "r", encoding="utf-8") as fh:
+        data = fh.read()
+    return data.strip() or "(memory is empty)"
+
+
+def _search_web(query: str) -> str:
+    if not _GSEARCH_OK or not _BS4_OK:
+        return (
+            "ERROR: web search unavailable.  "
+            "Install googlesearch-python and beautifulsoup4."
+        )
+    urls = list(_gsearch(query, num=5, stop=5, pause=2))
+    pages: list[str] = []
+    for url in urls:
+        try:
+            resp = requests.get(
+                url, timeout=10,
+                headers={"User-Agent": "Mozilla/5.0 Simple-Agents/2.0"},
+            )
+            resp.raise_for_status()
+            soup  = _BS4(resp.text, "html.parser")
+            title_tag = soup.find("title")
+            title = title_tag.get_text(strip=True) if title_tag else "No title"
+            parts   = [t.get_text(" ", strip=True) for t in soup.select("h1,h2,h3,p")[:10]]
+            excerpt = " ".join(parts)[:600]
+            pages.append(f"URL: {url}\nTitle: {title}\nExcerpt: {excerpt}")
+        except Exception as exc:
+            pages.append(f"URL: {url}\nERROR: {exc}")
+    return "\n\n---\n\n".join(pages) if pages else "No results found."
+
+
+def _get_specs() -> str:
+    """Return basic OS / hardware information."""
+    if IS_WINDOWS:
+        cmd = 'systeminfo | findstr /C:"OS" /C:"Memory" /C:"Processor"'
+    else:
+        cmd = "uname -a && (free -h 2>/dev/null || true) && (nproc 2>/dev/null || true)"
+    return _run_command(cmd)
+
+
+# ── Advanced tool implementations ──────────────────────────────────────────────
+
+# Maximum characters to keep from any single tool output before truncating.
+# Prevents one large READ_FILE or RUN output from flooding the context window.
+_MAX_TOOL_OUT = 4000
+# Maximum characters per history entry (caps very long agent or tooling responses)
+_MAX_ENTRY_CHARS = 8000
+
+
+def _trim_entry(text: str) -> str:
+    """Truncate a history entry to _MAX_ENTRY_CHARS (keeping head + tail)."""
+    if len(text) <= _MAX_ENTRY_CHARS:
+        return text
+    keep = _MAX_ENTRY_CHARS // 2
+    omitted = len(text) - _MAX_ENTRY_CHARS
+    return text[:keep] + f"\n\n[…{omitted} chars omitted for brevity…]\n\n" + text[-keep:]
+
+
+def _trim_out(text: str, limit: int = _MAX_TOOL_OUT) -> str:
+    """Truncate a single tool output string."""
+    if len(text) <= limit:
+        return text
+    keep = limit // 2
+    omitted = len(text) - limit
+    return text[:keep] + f"\n[…{omitted} chars truncated…]\n" + text[-keep:]
+
+
+def _patch_file(path: str, patch_body: str) -> str:
+    """Apply one or more FIND/REPLACE patches to an existing file.
+
+    Patch format (one or more blocks):
+        <<<<<<< FIND
+        old text
+        =======
+        new text
+        >>>>>>> REPLACE
+    """
+    if not os.path.exists(path):
+        return f"ERROR: file not found: {path}"
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            original = fh.read()
+
+        pattern = re.compile(
+            r"<{7}\s*FIND\n(.*?)\n={7}\n(.*?)\n>{7}\s*REPLACE",
+            re.DOTALL,
+        )
+        matches = list(pattern.finditer(patch_body))
+        if not matches:
+            return "ERROR: no valid <<<<<<< FIND … ======= … >>>>>>> REPLACE blocks found."
+
+        modified = original
+        for m in matches:
+            find_text    = m.group(1)
+            replace_text = m.group(2)
+            if find_text not in modified:
+                return f"ERROR: FIND text not present in {path}:\n{find_text[:300]}"
+            modified = modified.replace(find_text, replace_text, 1)
+
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(modified)
+        size = os.path.getsize(path)
+        _log(f"PATCH_FILE: {path} ({len(matches)} patch(es), {size} bytes)")
+        return f"Applied {len(matches)} patch(es) to {path} — {size} bytes total."
+    except Exception as exc:
+        return f"ERROR patching {path}: {exc}"
+
+
+def _grep(pattern: str, path: str) -> str:
+    """Search for *pattern* in *path* (file or directory tree)."""
+    if IS_WINDOWS:
+        if os.path.isdir(path):
+            cmd = f'findstr /s /n /i "{pattern}" "{path}\\*"'
+        else:
+            cmd = f'findstr /n "{pattern}" "{path}"'
+    else:
+        flags = "-rn" if os.path.isdir(path) else "-n"
+        incl  = "--include='*.py' --include='*.js' --include='*.ts' --include='*.html' --include='*.css' --include='*.txt' --include='*.md'" if os.path.isdir(path) else ""
+        cmd   = f"grep {flags} {incl} '{pattern}' '{path}' 2>/dev/null | head -80"
+    result = _run_command(cmd)
+    _log(f"GREP: {pattern!r} in {path}")
+    return result or "(no matches)"
+
+
+def _list_dir(path: str) -> str:
+    """Return a compact directory listing with file sizes."""
+    if not os.path.exists(path):
+        return f"ERROR: path not found: {path}"
+    try:
+        entries: list[str] = []
+        for name in sorted(os.listdir(path)):
+            full = os.path.join(path, name)
+            if os.path.isdir(full):
+                entries.append(f"  [DIR]  {name}/")
+            else:
+                size = os.path.getsize(full)
+                entries.append(f"  {size:>8}B  {name}")
+        _log(f"LIST_DIR: {path} ({len(entries)} entries)")
+        return f"{path}\n" + ("\n".join(entries) if entries else "  (empty)")
+    except Exception as exc:
+        return f"ERROR listing {path}: {exc}"
+
+
+def _append_file(path: str, content: str) -> str:
+    """Append *content* to *path*, creating it if needed."""
+    try:
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(content)
+        size = os.path.getsize(path)
+        _log(f"APPEND_FILE: {path} ({size} bytes total)")
+        return f"Appended to {path} — {size} bytes total."
+    except Exception as exc:
+        return f"ERROR appending to {path}: {exc}"
+
+
+def _check_bugs(path: str) -> str:
+    """Run static analysis on *path* and return combined findings."""
+    if not os.path.exists(path):
+        return f"ERROR: file not found: {path}"
+
+    results: list[str] = []
+
+    # 1. Syntax check
+    compile_out = _run_command(
+        f'"{PY_CMD}" -m py_compile "{path}" 2>&1 && echo "Syntax OK"'
+    )
+    results.append(f"[py_compile]\n{compile_out}")
+
+    # 2. flake8 (style + logic errors)
+    flake_out = _run_command(f'"{PY_CMD}" -m flake8 --max-line-length=120 "{path}" 2>&1')
+    if "No module named flake8" not in flake_out:
+        results.append(f"[flake8]\n{flake_out or 'No issues.'}")
+
+    # 3. pylint errors-only (deeper analysis)
+    pylint_out = _run_command(
+        f'"{PY_CMD}" -m pylint --errors-only --score=no "{path}" 2>&1'
+    )
+    if "No module named pylint" not in pylint_out:
+        results.append(f"[pylint --errors-only]\n{pylint_out or 'No errors.'}")
+
+    combined = "\n\n".join(results)
+    _log(f"CHECK_BUGS: {path}")
+    return _trim_out(combined, 3000)
+
+
+def _deep_think(query: str) -> str:
+    """Call a dedicated GLM instance to reason through a hard problem.
+
+    Uses GLM's extended reasoning tokens to produce a structured analysis.
+    The thinking tokens are printed live (grey); only the final answer is returned.
+    """
+    system = (
+        "You are an expert technical advisor with deep knowledge of software "
+        "architecture, algorithms, and debugging.  The user will present a hard "
+        "problem.  Think carefully and return a structured, actionable analysis "
+        "with clear recommendations.  Be concise but thorough."
+    )
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user",   "content": query},
+    ]
+    spinner = Spinner("THINK", C.BLUE)
+    spinner.start()
+    try:
+        # Always use GLM for thinking — it has the best chain-of-thought
+        result = _stream_response(GLM, messages, 8192, [], spinner)
+    except Exception as exc:
+        spinner.stop()
+        return f"ERROR in THINK: {exc}"
+    return result or "(no analysis returned)"
+
+
+# Guard against recursive DELEGATE calls
+_delegate_depth = 0
+_DELEGATE_MAX_DEPTH = 1
+
+
+def _delegate(task: str) -> str:
+    """Spawn a focused one-shot sub-agent to complete a self-contained task.
+
+    The sub-agent uses the CODER model, can emit WRITE_FILE:/RUN:/etc. tool
+    syntax, and those calls are executed by Python (but cannot nest further
+    DELEGATE calls to prevent infinite recursion).
+    """
+    global _delegate_depth
+    if _delegate_depth >= _DELEGATE_MAX_DEPTH:
+        return "ERROR: Nested DELEGATE calls are not allowed (max depth 1)."
+
+    system = (
+        f"You are a focused implementation sub-agent running on {OS_NAME}.\n"
+        f"Complete the given task fully and correctly.\n"
+        f"Use WRITE_FILE:, RUN:, READ_FILE:, PATCH_FILE:, CHECK_BUGS: as needed.\n"
+        f"Verify every file after writing.  End with a brief summary of what you did."
+    )
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user",   "content": f"Task:\n{task}\n\nBegin now."},
+    ]
+
+    spinner = Spinner("DELEGATE", C.BLUE)
+    spinner.start()
+    _delegate_depth += 1
+    try:
+        response = _stream_response(
+            CODER_MODEL, messages, 16384, _AGENT_STOPS, spinner,
+        )
+    except Exception as exc:
+        spinner.stop()
+        _delegate_depth -= 1
+        return f"ERROR in DELEGATE sub-agent: {exc}"
+    finally:
+        _delegate_depth -= 1
+
+    # Execute tool calls emitted by the sub-agent (no further delegation)
+    tool_out = _dispatch_ops(response, allow_delegate=False)
+    _log(f"DELEGATE task:\n{task}\nSub-agent:\n{response}\nTool output:\n{tool_out}")
+
+    parts = [f"[Sub-agent response]\n{response}"]
+    if tool_out:
+        parts.append(f"[Sub-agent tool output]\n{tool_out}")
+    return "\n\n".join(parts)
+
+
+# ── Tool parsing & dispatch ────────────────────────────────────────────────────
+
+def _kw(line: str, keyword: str) -> int:
+    """Return the start index of *keyword* in *line* at a word boundary, else -1."""
     idx = line.find(keyword)
     if idx == -1:
         return -1
-    # Accept if at start of line or preceded by a non-alpha character
     if idx == 0 or not line[idx - 1].isalpha():
         return idx
     return -1
 
 
-def extract_tool_operations(response: str) -> list[tuple]:
-    operations: list[tuple] = []
-    lines = response.splitlines()
-    i = 0
+def _parse_block(keyword: str, s: str, lines: list[str], i: int) -> tuple[str, int]:
+    """Parse an optional multi-line ---…--- block for *keyword*.
 
+    Returns (text, new_i).  If no --- block follows the keyword line, the
+    inline text (rest of the same line after the keyword) is returned and i+1.
+    """
+    kw_idx = _kw(s, keyword)
+    inline  = s[kw_idx + len(keyword):].strip() if kw_idx != -1 else ""
+    j = i + 1
+    while j < len(lines) and not lines[j].strip():
+        j += 1
+    if j < len(lines) and lines[j].strip() == "---":
+        j += 1
+        body: list[str] = []
+        while j < len(lines) and lines[j].strip() != "---":
+            body.append(lines[j])
+            j += 1
+        if j < len(lines):
+            j += 1
+        return ("\n".join(body) or inline), j
+    return inline, i + 1
+
+
+def _parse_ops(text: str) -> list[tuple]:
+    """Extract ordered list of tool operations embedded in *text*."""
+    ops:   list[tuple] = []
+    lines: list[str]   = text.splitlines()
+    i = 0
     while i < len(lines):
-        stripped = lines[i].strip()
-        if not stripped:
+        s = lines[i].strip()
+        if not s:
             i += 1
             continue
 
-        # ── WRITE_FILE ────────────────────────────────────────────────────────
-        idx = _find_keyword(stripped, "WRITE_FILE:")
+        # ── WRITE_FILE (needs --- block) ───────────────────────────────────────
+        idx = _kw(s, "WRITE_FILE:")
         if idx != -1:
-            path = stripped[idx + len("WRITE_FILE:"):].strip()
+            path = s[idx + len("WRITE_FILE:"):].strip()
             j = i + 1
-            while j < len(lines) and lines[j].strip() == "":
+            while j < len(lines) and not lines[j].strip():
                 j += 1
             if j < len(lines) and lines[j].strip() == "---":
                 j += 1
-                content_lines = []
+                body: list[str] = []
                 while j < len(lines) and lines[j].strip() != "---":
-                    content_lines.append(lines[j])
+                    body.append(lines[j])
                     j += 1
                 if j < len(lines):
                     j += 1
-                    if path:
-                        operations.append(("WRITE_FILE", path, "\n".join(content_lines)))
-                        i = j
-                        continue
+                if path:
+                    ops.append(("WRITE_FILE", path, "\n".join(body)))
+                    i = j
+                    continue
             i += 1
             continue
 
-        # ── WRITE_TO_MEMORY ───────────────────────────────────────────────────
-        idx = _find_keyword(stripped, "WRITE_TO_MEMORY:")
+        # ── PATCH_FILE (needs --- block with FIND/REPLACE markers) ────────────
+        idx = _kw(s, "PATCH_FILE:")
         if idx != -1:
-            content = stripped[idx + len("WRITE_TO_MEMORY:"):].strip()
-            if content:
-                operations.append(("WRITE_TO_MEMORY", content))
+            path = s[idx + len("PATCH_FILE:"):].strip()
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if j < len(lines) and lines[j].strip() == "---":
+                j += 1
+                body = []
+                while j < len(lines) and lines[j].strip() != "---":
+                    body.append(lines[j])
+                    j += 1
+                if j < len(lines):
+                    j += 1
+                if path:
+                    ops.append(("PATCH_FILE", path, "\n".join(body)))
+                    i = j
+                    continue
             i += 1
             continue
 
-        # ── READ_FROM_MEMORY ──────────────────────────────────────────────────
-        if _find_keyword(stripped, "READ_FROM_MEMORY") != -1:
-            operations.append(("READ_FROM_MEMORY",))
-            i += 1
-            continue
-
-        # ── RUN ───────────────────────────────────────────────────────────────
-        idx = _find_keyword(stripped, "RUN:")
+        # ── APPEND_FILE (needs --- block) ──────────────────────────────────────
+        idx = _kw(s, "APPEND_FILE:")
         if idx != -1:
-            command = stripped[idx + len("RUN:"):].strip()
-            if command:
-                operations.append(("RUN", command))
+            path = s[idx + len("APPEND_FILE:"):].strip()
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if j < len(lines) and lines[j].strip() == "---":
+                j += 1
+                body = []
+                while j < len(lines) and lines[j].strip() != "---":
+                    body.append(lines[j])
+                    j += 1
+                if j < len(lines):
+                    j += 1
+                if path:
+                    ops.append(("APPEND_FILE", path, "\n".join(body)))
+                    i = j
+                    continue
             i += 1
             continue
 
-        # ── READ_FILE ─────────────────────────────────────────────────────────
-        idx = _find_keyword(stripped, "READ_FILE:")
+        # ── THINK (inline or --- block) ────────────────────────────────────────
+        if _kw(s, "THINK:") != -1:
+            text_out, i = _parse_block("THINK:", s, lines, i)
+            if text_out:
+                ops.append(("THINK", text_out))
+            continue
+
+        # ── DELEGATE (inline or --- block) ─────────────────────────────────────
+        if _kw(s, "DELEGATE:") != -1:
+            text_out, i = _parse_block("DELEGATE:", s, lines, i)
+            if text_out:
+                ops.append(("DELEGATE", text_out))
+            continue
+
+        # ── RUN ────────────────────────────────────────────────────────────────
+        idx = _kw(s, "RUN:")
         if idx != -1:
-            path = stripped[idx + len("READ_FILE:"):].strip()
+            cmd = s[idx + len("RUN:"):].strip().strip("`")
+            cmd = re.sub(r"</?\w[^>]*>", "", cmd).strip()
+            if cmd:
+                ops.append(("RUN", cmd))
+            i += 1
+            continue
+
+        # ── READ_FILE ──────────────────────────────────────────────────────────
+        idx = _kw(s, "READ_FILE:")
+        if idx != -1:
+            path = s[idx + len("READ_FILE:"):].strip()
             if path:
-                operations.append(("READ_FILE", path))
+                ops.append(("READ_FILE", path))
             i += 1
             continue
 
-        # ── SEARCH_WEB ────────────────────────────────────────────────────────
-        idx = _find_keyword(stripped, "SEARCH_WEB:")
+        # ── WRITE_TO_MEMORY ────────────────────────────────────────────────────
+        idx = _kw(s, "WRITE_TO_MEMORY:")
         if idx != -1:
-            query = stripped[idx + len("SEARCH_WEB:"):].strip().strip('"').strip("'")
-            if query:
-                operations.append(("SEARCH_WEB", query))
+            content = s[idx + len("WRITE_TO_MEMORY:"):].strip()
+            if content:
+                ops.append(("WRITE_MEMORY", content))
             i += 1
             continue
 
-        # ── GET_SPECS ─────────────────────────────────────────────────────────
-        if _find_keyword(stripped, "GET_SPECS:") != -1:
-            operations.append(("GET_SPECS",))
+        # ── READ_FROM_MEMORY ───────────────────────────────────────────────────
+        if _kw(s, "READ_FROM_MEMORY") != -1:
+            ops.append(("READ_MEMORY",))
+            i += 1
+            continue
+
+        # ── GREP: pattern /abs/path ────────────────────────────────────────────
+        idx = _kw(s, "GREP:")
+        if idx != -1:
+            rest  = s[idx + len("GREP:"):].strip()
+            parts = rest.rsplit(None, 1)
+            if len(parts) == 2:
+                ops.append(("GREP", parts[0], parts[1]))
+            elif parts:
+                ops.append(("GREP", parts[0], WORKSPACE))
+            i += 1
+            continue
+
+        # ── LIST_DIR ───────────────────────────────────────────────────────────
+        idx = _kw(s, "LIST_DIR:")
+        if idx != -1:
+            path = s[idx + len("LIST_DIR:"):].strip()
+            if path:
+                ops.append(("LIST_DIR", path))
+            i += 1
+            continue
+
+        # ── CHECK_BUGS ─────────────────────────────────────────────────────────
+        idx = _kw(s, "CHECK_BUGS:")
+        if idx != -1:
+            path = s[idx + len("CHECK_BUGS:"):].strip()
+            if path:
+                ops.append(("CHECK_BUGS", path))
+            i += 1
+            continue
+
+        # ── SEARCH_WEB ─────────────────────────────────────────────────────────
+        idx = _kw(s, "SEARCH_WEB:")
+        if idx != -1:
+            query = s[idx + len("SEARCH_WEB:"):].strip().strip('"').strip("'")
+            if query:
+                ops.append(("SEARCH_WEB", query))
+            i += 1
+            continue
+
+        # ── GET_SPECS ──────────────────────────────────────────────────────────
+        if _kw(s, "GET_SPECS:") != -1 or s == "GET_SPECS":
+            ops.append(("GET_SPECS",))
             i += 1
             continue
 
         i += 1
 
-    return operations
+    return ops
 
 
-def handle_tool_calls(response: str) -> str:
-    if not response:
-        return "[No response received from agent]"
+def _dispatch_ops(text: str, allow_delegate: bool = True) -> str:
+    """Execute all tool ops found in *text*; return combined TOOL OUTPUT string."""
+    ops = _parse_ops(text)
+    if not ops:
+        return ""
 
-    tool_outputs = []
+    outputs: list[str] = []
+    for op in ops:
+        kind = op[0]
 
-    operations = extract_tool_operations(response)
-    if not operations:
-        return response
-
-    for operation in operations:
-        kind = operation[0]
-
-        if kind == 'WRITE_FILE':
-            _, path, content = operation
-            print(f"\n  {C.YELLOW}✎ Writing file:{C.RESET} {path}")
-            result = write_file_to_disk(path, content)
+        if kind == "WRITE_FILE":
+            _, path, content = op
+            print(f"\n  {C.YELLOW}✎ Write:{C.RESET}  {path}")
+            result = _write_file(path, content)
             print(f"  {C.DIM}→ {result}{C.RESET}")
-            tool_outputs.append(result)
-            continue
+            outputs.append(result)
 
-        if kind == "WRITE_TO_MEMORY":
-            _, content = operation
-            write_to_persistent_memory(content)
-            result = "Wrote content to persistent memory!"
-            print(f"\n  {C.YELLOW}🧠 Memory write:{C.RESET} {content[:120]}")
+        elif kind == "PATCH_FILE":
+            _, path, patch = op
+            print(f"\n  {C.YELLOW}✂ Patch:{C.RESET}  {path}")
+            result = _patch_file(path, patch)
             print(f"  {C.DIM}→ {result}{C.RESET}")
-            tool_outputs.append(result)
-            continue
+            outputs.append(result)
 
-        if kind == "READ_FROM_MEMORY":
-            memory_content = read_persistent_memory().strip()
-            result = memory_content if memory_content else "(memory empty)"
-            print(f"\n  {C.YELLOW}🧠 Memory read{C.RESET}")
+        elif kind == "APPEND_FILE":
+            _, path, content = op
+            print(f"\n  {C.YELLOW}➕ Append:{C.RESET} {path}")
+            result = _append_file(path, content)
+            print(f"  {C.DIM}→ {result}{C.RESET}")
+            outputs.append(result)
+
+        elif kind == "RUN":
+            _, cmd = op
+            print(f"\n  {C.YELLOW}⚙ Run:{C.RESET}   {cmd}")
+            result = _trim_out(_run_command(cmd))
             print(f"  {C.DIM}→ {result[:300]}{C.RESET}")
-            tool_outputs.append(f"READ_FROM_MEMORY:\n{result}")
-            continue
+            outputs.append(f"$ {cmd}\n{result}")
 
-        if kind == "RUN":
-            _, raw_command = operation
-            command = sanitize_run_command(raw_command)
-            if not command:
-                tool_outputs.append(
-                    f"WARNING: Could not parse a valid shell command from RUN: {raw_command}"
-                )
+        elif kind == "READ_FILE":
+            _, path = op
+            print(f"\n  {C.YELLOW}📖 Read:{C.RESET}  {path}")
+            result = _trim_out(_read_file(path))
+            print(f"  {C.DIM}→ {result[:200]}{C.RESET}")
+            outputs.append(f"READ_FILE {path}:\n{result}")
+
+        elif kind == "WRITE_MEMORY":
+            _, content = op
+            _write_memory(content)
+            print(f"\n  {C.YELLOW}🧠 Mem+:{C.RESET}  {content[:80]}")
+            outputs.append("Memory saved.")
+
+        elif kind == "READ_MEMORY":
+            result = _read_memory()
+            print(f"\n  {C.YELLOW}🧠 Mem?{C.RESET}")
+            outputs.append(f"MEMORY:\n{result}")
+
+        elif kind == "GREP":
+            _, pattern, path = op
+            print(f"\n  {C.YELLOW}🔎 Grep:{C.RESET}  {pattern!r} in {path}")
+            result = _trim_out(_grep(pattern, path), 2000)
+            print(f"  {C.DIM}→ {result[:200]}{C.RESET}")
+            outputs.append(f"GREP {pattern!r} {path}:\n{result}")
+
+        elif kind == "LIST_DIR":
+            _, path = op
+            print(f"\n  {C.YELLOW}📂 List:{C.RESET}  {path}")
+            result = _list_dir(path)
+            print(f"  {C.DIM}→ {result[:200]}{C.RESET}")
+            outputs.append(f"LIST_DIR {path}:\n{result}")
+
+        elif kind == "CHECK_BUGS":
+            _, path = op
+            print(f"\n  {C.YELLOW}🐛 Check:{C.RESET} {path}")
+            result = _check_bugs(path)
+            print(f"  {C.DIM}→ {result[:300]}{C.RESET}")
+            outputs.append(f"CHECK_BUGS {path}:\n{result}")
+
+        elif kind == "THINK":
+            _, query = op
+            print(f"\n  {C.BLUE}💡 Think:{C.RESET} {query[:80]}")
+            result = _trim_out(_deep_think(query), 3000)
+            outputs.append(f"THINK analysis:\n{result}")
+
+        elif kind == "DELEGATE":
+            _, task = op
+            if not allow_delegate:
+                outputs.append("ERROR: nested DELEGATE calls are not permitted.")
                 continue
+            print(f"\n  {C.BLUE}🤖 Delegate:{C.RESET} {task[:80]}")
+            result = _trim_out(_delegate(task), 4000)
+            outputs.append(f"DELEGATE result:\n{result}")
 
-            print(f"\n  {C.YELLOW}⚙ Executing:{C.RESET} {command}")
-            result = run_command(command)
-            print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
-            tool_outputs.append(f"$ {command}\n{result}")
-            continue
-
-        if kind == "READ_FILE":
-            _, path = operation
-            print(f"\n  {C.YELLOW}📖 Reading file:{C.RESET} {path}")
-            result = read_file(path)
-            print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
-            tool_outputs.append(f"READ_FILE: {path}\n{result}")
-            continue
-
-        if kind == "SEARCH_WEB":
-            _, query = operation
-            if not can_search:
-                tool_outputs.append("SEARCH_WEB is disabled. Run with --can_use_web_search to enable it.")
+        elif kind == "SEARCH_WEB":
+            _, query = op
+            if not ARGS.can_use_web_search:
+                outputs.append("SEARCH_WEB disabled — pass --can_use_web_search True.")
                 continue
-            print(f"\n  {C.YELLOW}🔍 Searching web for:{C.RESET} {query}")
-            result = search_web(query)
-            print(f"  {C.DIM}→ {result.strip()[:300]}{C.RESET}")
-            tool_outputs.append(f"SEARCH_WEB: {query}\n{result}")
+            print(f"\n  {C.YELLOW}🔍 Search:{C.RESET} {query}")
+            result = _trim_out(_search_web(query), 2000)
+            print(f"  {C.DIM}→ {result[:200]}{C.RESET}")
+            outputs.append(f"SEARCH_WEB {query!r}:\n{result}")
+
+        elif kind == "GET_SPECS":
+            print(f"\n  {C.YELLOW}💻 Specs{C.RESET}")
+            result = _trim_out(_get_specs(), 1000)
+            print(f"  {C.DIM}→ {result[:200]}{C.RESET}")
+            outputs.append(f"GET_SPECS:\n{result}")
+
+    return "\n---\n".join(outputs)
+
+
+
+# ── System prompts ─────────────────────────────────────────────────────────────
+
+# ── System prompts ─────────────────────────────────────────────────────────────
+
+def _tool_reference() -> str:
+    """Compact, token-optimised tool-reference block for main agent prompts."""
+    sep = "\\" if IS_WINDOWS else "/"
+    ex  = rf"C:\Users\project" if IS_WINDOWS else "/home/user/project"
+    return f"""
+══ TOOLS (OS: {OS_NAME} · shell: {OS_SHELL}) ══
+Invoke via: TOOLING_AGENT, <request>  ← at the END of your message only.
+
+File I/O
+  WRITE_FILE: {ex}{sep}file.py  →  ---content---          (all source files)
+  PATCH_FILE: {ex}{sep}file.py  →  ---<<<FIND…===…REPLACE---  (targeted edits)
+  APPEND_FILE:{ex}{sep}log.txt  →  ---content---          (append-only writes)
+  READ_FILE:  {ex}{sep}file.py                            (read full contents)
+
+Shell & Search
+  RUN: {LS_CMD} {ex}           (any shell command; no backticks, no heredocs)
+  GREP: pattern {ex}           (regex search in file or directory tree)
+  LIST_DIR: {ex}               (compact size-annotated directory listing)
+
+Memory
+  WRITE_TO_MEMORY: brief note  /  READ_FROM_MEMORY
+
+Intelligence
+  THINK: hard question          (deep reasoning from a GLM advisor)
+  CHECK_BUGS: {ex}{sep}file.py  (py_compile + flake8 + pylint --errors-only)
+  DELEGATE: self-contained task (spawns a focused one-shot coding sub-agent)
+
+System
+  GET_SPECS:   /   SEARCH_WEB: "query"  (web search; requires --can_use_web_search True)
+
+Rules: absolute paths only · TOOLING_AGENT, at END · verify WRITE_FILE with {LS_CMD}
+never fake tool output · fix every error before continuing · files < {ARGS.max_lines} lines
+workspace: {WORKSPACE}"""
+
+
+_TOOL_REF = _tool_reference()
+
+PLANNER_SYSTEM = f"""You are PLANNER, a senior software architect.
+You work with CODER in a real {OS_NAME} environment.  Commands execute on real hardware.
+
+SESSION START (every session):
+• TOOLING_AGENT, READ_FROM_MEMORY then GET_SPECS: to confirm the environment.
+
+PLANNING (before any code):
+• List every file with its full absolute path and purpose.
+• Save the complete plan via WRITE_TO_MEMORY:.
+• Use THINK: before deciding architectures for complex problems.
+
+DIRECTING CODER:
+• One file at a time.  After each: verify {LS_CMD} (non-zero size) + {PY_CMD} -m py_compile.
+• Use CHECK_BUGS: after any non-trivial Python file.
+• Never advance if the previous step failed.
+
+DONE: only when every planned file is verified non-zero AND compiles without error.
+{_TOOL_REF}"""
+
+CODER_SYSTEM = f"""You are CODER, an expert software engineer.
+You work with PLANNER in a real {OS_NAME} environment.  Every command executes on real hardware.
+
+SESSION START (first turn only):
+• TOOLING_AGENT, READ_FROM_MEMORY to get PLANNER's plan.
+
+IMPLEMENTATION:
+• Write all files using WRITE_FILE: only — never via RUN: python -c or shell one-liners.
+• Prefer PATCH_FILE: for small edits to existing files (saves tokens and avoids full rewrites).
+• After every write: {LS_CMD} (non-zero) + {PY_CMD} -m py_compile + run if applicable.
+• Use CHECK_BUGS: to find issues before reporting a file done.
+• Use THINK: when facing hard algorithmic or architectural decisions.
+• Use DELEGATE: for self-contained sub-tasks (e.g. write a standalone utility module).
+
+ERRORS: Fix every error in TOOL OUTPUT before continuing.  If stuck, change approach and tell PLANNER.
+Never claim success unless TOOL OUTPUT confirms non-zero bytes.
+{_TOOL_REF}"""
+
+TOOLING_AGENT_SYSTEM = f"""You are the Tool Execution Agent on {OS_NAME} ({OS_SHELL}).
+Translate agent requests into tool syntax, execute them, report real output.
+
+RESPONSE FORMAT: Start with "TOOL OUTPUT SUMMARY:" then results separated by "---".
+AUTO: After any WRITE_FILE: → always verify with RUN: {LS_CMD} <path>.
+END:  Always append WRITE_TO_MEMORY: with a brief progress note.
+
+BLOCKED: rm -rf /, mkfs, dd if=/dev/zero, shutdown, reboot, format c:, rd /s /q c:
+
+TOOL SYNTAX — emit these lines verbatim:
+
+  WRITE_FILE: /abs/path          PATCH_FILE: /abs/path
+  ---content---                  ---<<<FIND…===…REPLACE---
+
+  APPEND_FILE: /abs/path         READ_FILE: /abs/path
+  ---content---
+
+  RUN: command                   GREP: pattern /abs/path
+  LIST_DIR: /abs/path            CHECK_BUGS: /abs/path.py
+
+  WRITE_TO_MEMORY: note          READ_FROM_MEMORY
+  SEARCH_WEB: "query"            GET_SPECS:
+  THINK: question                DELEGATE: task description
+
+STRICT RULES:
+• Report exact stdout/stderr — never soften or invent output.
+• Zero bytes written = failure.  Report it verbatim.
+• Do NOT write code, make plans, or interpret goals beyond executing them.
+"""
+
+# ── Load supplemental per-tool docs from agent/tools/*.txt ────────────────────
+
+_tools_dir = os.path.join(WORKSPACE, "agent", "tools")
+if os.path.isdir(_tools_dir):
+    for _fname in sorted(os.listdir(_tools_dir)):
+        if _fname.endswith(".txt"):
+            try:
+                with open(os.path.join(_tools_dir, _fname), "r", encoding="utf-8") as _fh:
+                    TOOLING_AGENT_SYSTEM += "\n\n" + _fh.read()
+            except Exception:
+                pass
+
+
+
+# ── LLM streaming helper ───────────────────────────────────────────────────────
+
+# Stop sequences that prevent main agents from roleplaying the tooling agent
+_AGENT_STOPS = [
+    "Tooling agent response:",
+    "TOOL OUTPUT:",
+    "TOOLING_AGENT RESPONSE:",
+    "Tooling Agent Output:",
+]
+
+# Stop sequences that prevent the tooling agent from roleplaying main agents
+_TOOLING_STOPS = [
+    "[PLANNER]", "[CODER]",
+    "PLANNER:", "CODER:",
+    "[TOOLING_AGENT]",
+]
+
+
+def _model_extra_body(model: str) -> dict:
+    """Return model-specific extra_body parameters."""
+    if model == GLM:
+        return {"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}}
+    if model == "deepseek-ai/deepseek-v4-flash":
+        return {"chat_template_kwargs": {"thinking": False}}
+    return {}
+
+
+def _stream_response(
+    model: str,
+    messages: list[dict],
+    max_tokens: int,
+    stop_seqs: list[str],
+    spinner: Spinner,
+) -> str:
+    """
+    Stream a response from the NVIDIA API.
+    Reasoning tokens are printed in grey but excluded from the return value.
+    Returns the collected content text.
+    """
+    extra = _model_extra_body(model)
+    params: dict = dict(
+        model=model,
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=0.7 if model == QWEN_CODER else 1.0,
+        top_p=0.95,
+        stream=True,
+        stop=stop_seqs,
+    )
+    if extra:
+        params["extra_body"] = extra
+
+    completion = client.chat.completions.create(**params)
+
+    content_parts: list[str] = []
+    had_reasoning   = False
+    spinner_stopped = False
+
+    for chunk in completion:
+        # Stop the spinner the first time any content arrives
+        if not spinner_stopped:
+            spinner.stop()
+            spinner_stopped = True
+
+        choices = getattr(chunk, "choices", None)
+        if not choices:
+            continue
+        delta = getattr(choices[0], "delta", None)
+        if delta is None:
             continue
 
-        if kind == "GET_SPECS":
-            specs = get_specs()
-            tool_outputs.append(specs)
-            print(f"\n {C.YELLOW} Device specs are: {specs}")
+        # Print reasoning tokens in grey (not collected into return value)
+        reasoning = (
+            getattr(delta, "reasoning_content", None)
+            or getattr(delta, "reasoning", None)
+        )
+        if reasoning:
+            print(f"{C.GREY}{reasoning}{C.RESET}", end="", flush=True)
+            had_reasoning = True
 
-    if not tool_outputs:
-        return response
+        text = getattr(delta, "content", None)
+        if text is None:
+            continue
 
-    return response + "\n\nTOOL OUTPUT:\n" + "\n---\n".join(tool_outputs)
-
-
-# ── Tooling agent ─────────────────────────────────────────────────────────────
-
-def get_tool_goals(response: str) -> str:
-    if not response:
-        return "[No response received from agent]"
-    idx = response.find("TOOLING_AGENT,")
-    if idx == -1:
-        return "Tooling agent was not called this turn."
-    return response[idx + len("TOOLING_AGENT,"):]
-
-
-# noinspection PyTypeChecker
-def call_tooling_agent(goals: str, logger: LOGGER=None) -> str:
-    system = TOOLING_AGENT_SYSTEM
-
-    max_retries = 5
-    base_delay = 5
-
-    for attempt in range(max_retries):
-        spinner = Spinner("GLM", "TOOLING_AGENT")
-        spinner.start()
-        t0 = time.time()
-
-        try:
-            content_parts = []
+        # Insert a newline after reasoning tokens end
+        if had_reasoning and not content_parts:
+            print(f"\n{C.RESET}", end="", flush=True)
             had_reasoning = False
-            first_chunk_seen = [False] ## why a list?
 
-            def stop_spinner_once():
-                if not first_chunk_seen[0]:
-                    first_chunk_seen[0] = True
-                    spinner.stop()
-                    print_turn_timing("TOOLING_AGENT", time.time() - t0)
+        full_so_far = "".join(content_parts) + text
+        low = full_so_far.lower()
 
-            completion = client.chat.completions.create(
-                model=GLM,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": goals}
-                ],
-                temperature=1,
-                stop=["[PLANNER]", "[CODER]", "PLANNER:", "CODER:", "PLANNER TURN"],  # Added stop sequences
-                top_p=1,
-                max_tokens=16384,
-                extra_body={"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": True}},
-                stream=True,
-            )
-            for chunk in completion:
-                stop_spinner_once()
-                if not getattr(chunk, "choices", None) or len(chunk.choices) == 0:
-                    continue
-                delta = getattr(chunk.choices[0], "delta", None)
-                if delta is None:
-                    continue
-                reasoning = getattr(delta, "reasoning_content", None)
-                if reasoning:
-                    print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
-                    had_reasoning = True
-                if getattr(delta, "content", None) is not None:
-                    chunk_text = delta.content
-                    if had_reasoning and not content_parts:
-                        print(f"\n{_RESET_COLOR}", end="", flush=True)
-                        had_reasoning = False
-                    full_so_far = "".join(content_parts) + chunk_text
+        # Client-side stop-sequence check (belt-and-suspenders)
+        cut = -1
+        for seq in stop_seqs:
+            pos = low.find(seq.lower())
+            if pos != -1 and (cut == -1 or pos < cut):
+                cut = pos
+        if cut != -1:
+            already = len("".join(content_parts))
+            keep = cut - already
+            if keep > 0:
+                print(text[:keep], end="", flush=True)
+                content_parts.append(text[:keep])
+            break
 
-                    has_stop = False
-                    # Look for tags that indicate the model is roleplaying another agent
-                    for stop_seq in ["[PLANNER]", "[CODER]", "PLANNER:", "CODER:", "[TOOLING_AGENT]"]:
-                        if stop_seq in full_so_far:
-                            has_stop = True
-                            idx = full_so_far.index(stop_seq)
-                            break
+        print(text, end="", flush=True)
+        content_parts.append(text)
 
-                    if has_stop:
-                        # Print and save only the text BEFORE the stop sequence
-                        keep_len = idx - len("".join(content_parts))
-                        if keep_len > 0:
-                            print(chunk_text[:keep_len], end="", flush=True)
-                            content_parts.append(chunk_text[:keep_len])
-                        break  # Kill the stream immediately
-                    else:
-                        print(chunk_text, end="", flush=True)
-                        content_parts.append(chunk_text)
-            stop_spinner_once()
-            response = "".join(content_parts)
-            response = response.replace("</think>", "").strip()
-            duration = time.time() - t0
-            if not response:
-                print(f"returned empty content.{C.RESET}", file=sys.stderr)
-                if logger:
-                    logger.log(f"{duration:0.2f}s  -  TOOLING_AGENT returned empty response.")
-                return "[Agent returned empty response]"
-            
-            if response:
-                if logger:
-                    logger.log(f"\n\n{duration:0.2f}s  -  TOOLING_AGENT response: " + response)
+    if not spinner_stopped:
+        spinner.stop()
+    print()  # newline after stream ends
 
-        except openai.RateLimitError:
-            spinner.stop()
-            delay = base_delay * (2 ** attempt) + random.uniform(0, 2)
-            print(f"\n  {C.YELLOW}⚠ Rate limited. Waiting {delay:.1f}s before retry "
-                  f"(attempt {attempt + 1}/{max_retries})...{C.RESET}")
-            time.sleep(delay)
-            continue
-
-        except (
-                openai.APIConnectionError,
-                openai.APITimeoutError,
-                httpx.RemoteProtocolError,
-                httpx.ReadError,
-                httpx.ReadTimeout,
-                requests.exceptions.ChunkedEncodingError,
-                requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout,
-        ) as e:
-            spinner.stop()
-            delay = base_delay * (2 ** attempt) + random.uniform(0, 2)
-            print(
-                f"\n  {C.YELLOW}⚠ Transient network/stream error: {type(e).__name__}: {e}.{C.RESET}\n"
-                f"  {C.YELLOW}Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})...{C.RESET}"
-            )
-            if log:
-                logger.log(
-                    f"\n   Transient network/stream error: {type(e).__name__}: {e}.\n"
-                    f"  Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})..."
-                )
-            time.sleep(delay)
-            continue
-
-        except Exception:
-            spinner.stop()
-            raise
-
-        tool_response = handle_tool_calls(response)
-        duration = time.time() - t0
-
-        # Extract only the actual tool output (strip the model's reasoning/preamble).
-        # handle_tool_calls appends "\n\nTOOL OUTPUT:\n..." to the raw response,
-        # so we just need everything from "TOOL OUTPUT:" onward.
-        summary_marker = "TOOL OUTPUT:"
-        marker_idx = tool_response.find(summary_marker)
-        if marker_idx != -1:
-            clean_summary = "TOOL OUTPUT SUMMARY:\n" + tool_response[marker_idx + len(summary_marker):].strip()
-        else:
-            # No tool operations were actually parsed — return the model text as-is
-            # (it may have explained why it can't run the command)
-            clean_summary = "TOOL OUTPUT SUMMARY:\n" + tool_response.strip()
-
-        if logger:
-            logger.log(f"\n\n{duration:0.2f}s  -  TOOLING AGENT SUMMARY: " + clean_summary.replace("\n", "\\n"))
-
-        return clean_summary
-    if log:
-        logger.log(f"ERROR: call_tooling_agent failed after {max_retries} retries due to transient API/connection errors.")
-    raise RuntimeError(f"call_tooling_agent failed after {max_retries} retries due to transient API/connection errors.")
+    return "".join(content_parts).replace("</think>", "").strip()
 
 
-# ── Agent call with retry ─────────────────────────────────────────────────────
+# ── Agent callers ──────────────────────────────────────────────────────────────
 
-def read_b64(path):
-    with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode()
+_AGENT_CFG: dict[str, tuple[str, str, str]] = {
+    "PLANNER": (GLM,        PLANNER_SYSTEM, C.CYAN),
+    "CODER":   (QWEN_CODER, CODER_SYSTEM,   C.MAGENTA),
+}
+
+_MAX_RETRIES  = 5
+_RETRY_BASE   = 5
+_RETRY_JITTER = 2.0
+
+_TRANSIENT_ERRORS = (
+    openai.APIConnectionError,
+    openai.APITimeoutError,
+    httpx.RemoteProtocolError,
+    httpx.ReadError,
+    httpx.ReadTimeout,
+    requests.exceptions.ChunkedEncodingError,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+)
 
 
-# noinspection PyTypeChecker
-def call_agent(model: str, agent_name: str, shared_history: list, max_tokens=16384, logger: LOGGER=None) -> str:
-    agent_config = {
-        "PLANNER": ("GLM-5.1", PLANNER_SYSTEM),
-        "CODER": ("GLM-5.1", CODER_SYSTEM),
-        # "PLANNER2": ("GLM-5.1", SECOND_PLANNER_SYSTEM),
-        # "CODER2": ("GLM-5.1", SECOND_CODER_SYSTEM),
-    }
-    if agent_name not in agent_config:
-        if log:
-            logger.log(f"ERROR: Unknown agent name '{agent_name}'. Expected one of: {list(agent_config.keys())}")
-        raise ValueError(f"Unknown agent name: '{agent_name}'. Expected one of: {list(agent_config.keys())}")
-    model_short, system = agent_config[agent_name]
+def _retry_delay(attempt: int) -> float:
+    return _RETRY_BASE * (2 ** attempt) + random.uniform(0, _RETRY_JITTER)
 
-    msg_list = [{"role": "system", "content": system}] ## does this add the system every time?
 
+def call_agent(
+    agent_name: str,
+    shared_history: list[tuple[str, str]],
+    max_tokens: int = 16384,
+) -> str:
+    """Call a named agent, returning its text response."""
+    if agent_name not in _AGENT_CFG:
+        raise ValueError(
+            f"Unknown agent: {agent_name!r}.  Valid choices: {list(_AGENT_CFG)}"
+        )
+    model, system, colour = _AGENT_CFG[agent_name]
+
+    # Build the message list — the agent sees its own prior turns as "assistant"
+    msg_list: list[dict] = [{"role": "system", "content": system}]
     for speaker, content in shared_history:
-        # Assign roles: The current agent sees its own history as "assistant", everyone else is "user"
         if speaker == "USER":
-            role = "user"
-            text = content
+            role, text = "user", content
         elif speaker == agent_name:
-            role = "assistant"
-            text = content
+            role, text = "assistant", content
         else:
-            role = "user"
-            text = f"[{speaker}]\n{content}"
+            role, text = "user", f"[{speaker}]\n{content}"
 
-        # Combine consecutive messages of the same role to prevent strict-template API crashes
+        # Merge consecutive same-role messages to avoid strict-template API errors
         if msg_list[-1]["role"] == role:
             msg_list[-1]["content"] += f"\n\n{text}"
         else:
             msg_list.append({"role": role, "content": text})
 
-    # Add a final contextual nudge to force the LLM to stay in character
-    nudge = f"\n\n[SYSTEM] It is your turn, {agent_name}. Proceed based on your system instructions."
+    nudge = (
+        f"\n\n[SYSTEM] It is now your turn, {agent_name}.  "
+        f"Proceed according to your instructions."
+    )
     if msg_list[-1]["role"] == "user":
         msg_list[-1]["content"] += nudge
     else:
         msg_list.append({"role": "user", "content": nudge})
 
-    max_retries = 5
-    base_delay = 5
-    begin = time.time()
-    for attempt in range(max_retries):
-        spinner = Spinner(agent_name, model_short)
+    t_start = time.time()
+    for attempt in range(_MAX_RETRIES):
+        spinner = Spinner(agent_name, colour)
         spinner.start()
-        t0 = time.time()
-
         try:
-            content_parts = []
-            had_reasoning = False
-            first_chunk_seen = [False]
-
-            def stop_spinner_once():
-                if not first_chunk_seen[0]:
-                    first_chunk_seen[0] = True
-                    spinner.stop()
-                    print_turn_timing(agent_name, time.time() - t0)
-
-
-            ### GLM
-            if model_short in {"GLM-5.1", "GLM"}:
-                # Use the caller-provided max_tokens (or the function default) instead of an
-                # extremely large constant (16384**2) which causes API errors. Some backends
-                # enforce a maximum total token limit; keep max_tokens reasonable.
-                completion = client.chat.completions.create(
-                    model=model,
-                    messages=msg_list,
-                    temperature=1,
-                    top_p=1,
-                    max_tokens=max_tokens,
-                    extra_body={"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}},
-                    stream=True,
-                    stop=["Tooling agent response:", "TOOL OUTPUT:", "TOOLING_AGENT RESPONSE:", "Tooling Agent Output:"]
-                )
-                for chunk in completion:
-                    stop_spinner_once()
-                    if not getattr(chunk, "choices", None) or len(chunk.choices) == 0:
-                        continue
-                    delta = getattr(chunk.choices[0], "delta", None)
-                    if delta is None:
-                        continue
-                    reasoning = getattr(delta, "reasoning_content", None)
-                    if reasoning:
-                        print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
-                        had_reasoning = True
-                    if getattr(delta, "content", None) is not None:
-                        chunk_text = delta.content
-                        if had_reasoning and not content_parts:
-                            print(f"\n{_RESET_COLOR}", end="", flush=True)
-                            had_reasoning = False
-                        full_so_far = "".join(content_parts) + chunk_text
-                        full_so_far_lower = full_so_far.lower()
-                        has_stop = False
-
-                        for stop_seq in ["tooling agent response", "tool output", "tooling_agent response", "tooling agent output"]:
-                            if stop_seq in full_so_far_lower:
-                                has_stop = True
-                                idx = full_so_far_lower.index(stop_seq)
-                                break
-                        
-                        if has_stop:
-                            keep_len = idx - len("".join(content_parts))
-                            if keep_len > 0:
-                                print(chunk_text[:keep_len], end="", flush=True)
-                                content_parts.append(chunk_text[:keep_len])
-                            break
-                        else:
-                            print(chunk_text, end="", flush=True)
-                            content_parts.append(chunk_text)
-                stop_spinner_once()
-                print()
-
-
-
-
-            #Gemma is fucked. Can't fix it rn. Working with one planner and two coders
-            ### GEMMA
-            elif model_short == "Gemma":
-                # Exactly the NVIDIA sample pattern, adapted to collect content
-                gemma_stream = False
-                gemma_headers = {
-                    "Authorization": f"Bearer {NVIDIA_API_KEY}",
-                    "Accept": "text/event-stream" if gemma_stream else "application/json",
-                }
-                payload = {
-                    "model": "google/gemma-4-31b-it",
-                    "messages": msg_list,
-                    "max_tokens": max_tokens,
-                    "temperature": 1.00,
-                    "top_p": 0.95,
-                    "stream": gemma_stream,
-                    "chat_template_kwargs": {"enable_thinking": False},
-                }
-                response = requests.post(invoke_url, headers=gemma_headers, json=payload, stream=gemma_stream)
-                if gemma_stream:
-                    for line in response.iter_lines():
-                        if line:
-                            stop_spinner_once()
-                            decoded = line.decode("utf-8")
-                            # print raw so it's always visible regardless of parse result
-                            print(decoded, flush=True)
-                            # also try to extract and collect just the text delta
-                            if decoded.startswith("data: "):
-                                data_str = decoded[len("data: "):]
-                                if data_str.strip() != "[DONE]":
-                                    try:
-                                        delta = json.loads(data_str).get("choices", [{}])[0].get("delta", {})
-                                        text = delta.get("content") or delta.get("text") or delta.get("message")
-                                        if text:
-                                            content_parts.append(text)
-                                    except json.JSONDecodeError:
-                                        pass
-                else:
-                    resp_json = response.json()
-                    stop_spinner_once()
-                    print()
-                    # Parse message content from response
-                    try:
-                        choices = resp_json.get("choices", [])
-                        if choices and len(choices) > 0:
-                            msg = choices[0].get("message", {})
-                            content = msg.get("content", "")
-                            if content:
-                                content_parts.append(content)
-                                print(content)
-                    except (KeyError, TypeError, AttributeError):
-                        pass
-
-                stop_spinner_once()
-                print()
-
-
-
-            ### QWEN
-            elif model_short == "Qwen3-480B":
-                completion = client.chat.completions.create(
-                    model=model,
-                    messages=msg_list,
-                    max_tokens=max_tokens,
-                    temperature=0.7,
-                    stream=True,
-                    stop=["Tooling agent response:", "TOOL OUTPUT:", "TOOLING_AGENT RESPONSE:", "Tooling Agent Output:"]
-                )
-                for chunk in completion:
-                    stop_spinner_once()
-                    if not getattr(chunk, "choices", None) or len(chunk.choices) == 0:
-                        continue
-                    delta = getattr(chunk.choices[0], "delta", None)
-                    if delta is None:
-                        continue
-                    reasoning = getattr(delta, "reasoning_content", None)
-                    if reasoning:
-                        print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
-                        had_reasoning = True
-                    if getattr(delta, "content", None) is not None:
-                        chunk_text = delta.content
-                        if had_reasoning and not content_parts:
-                            print(f"\n{_RESET_COLOR}", end="", flush=True)
-                            had_reasoning = False
-                        full_so_far = "".join(content_parts) + chunk_text
-                        full_so_far_lower = full_so_far.lower()
-                        has_stop = False
-                        for stop_seq in ["tooling agent response", "tool output", "tooling_agent response", "tooling agent output"]:
-                            if stop_seq in full_so_far_lower:
-                                has_stop = True
-                                idx = full_so_far_lower.index(stop_seq)
-                                break
-                        
-                        if has_stop:
-                            keep_len = idx - len("".join(content_parts))
-                            if keep_len > 0:
-                                print(chunk_text[:keep_len], end="", flush=True)
-                                content_parts.append(chunk_text[:keep_len])
-                            break
-                        else:
-                            print(chunk_text, end="", flush=True)
-                            content_parts.append(chunk_text)
-                stop_spinner_once()
-                print()
-
-
-            ### DEEPSEEK
-            elif model_short == "Deepseek V4 Flash":
-                completion = client.chat.completions.create(
-                    model=model,
-                    messages=msg_list,
-                    temperature=1,
-                    top_p=0.95,
-                    max_tokens=16384,
-                    extra_body={"chat_template_kwargs": {"thinking": False}},
-                    stream=True,
-                    stop=["Tooling agent response:", "TOOL OUTPUT:", "TOOLING_AGENT RESPONSE:", "Tooling Agent Output:"]
-                )
-
-                for chunk in completion:
-                    stop_spinner_once()
-                    if not getattr(chunk, "choices", None) or len(chunk.choices) == 0:
-                        continue
-                    delta = getattr(chunk.choices[0], "delta", None)
-                    if delta is None:
-                        continue
-                    reasoning = getattr(delta, "reasoning", None) or getattr(delta, "reasoning_content", None)
-                    if reasoning:
-                        print(f"{_REASONING_COLOR}{reasoning}{_RESET_COLOR}", end="", flush=True)
-                        had_reasoning = True
-                    if getattr(delta, "content", None) is not None:
-                        chunk_text = delta.content
-                        if had_reasoning and not content_parts:
-                            print(f"\n{_RESET_COLOR}", end="", flush=True)
-                            had_reasoning = False
-                        full_so_far = "".join(content_parts) + chunk_text
-                        full_so_far_lower = full_so_far.lower()
-                        has_stop = False
-                        for stop_seq in ["tooling agent response", "tool output", "tooling_agent response", "tooling agent output"]:
-                            if stop_seq in full_so_far_lower:
-                                has_stop = True
-                                idx = full_so_far_lower.index(stop_seq)
-                                break
-                        
-                        if has_stop:
-                            keep_len = idx - len("".join(content_parts))
-                            if keep_len > 0:
-                                print(chunk_text[:keep_len], end="", flush=True)
-                                content_parts.append(chunk_text[:keep_len])
-                            break
-                        else:
-                            print(chunk_text, end="", flush=True)
-                            content_parts.append(chunk_text)
-                stop_spinner_once()
-                print()
-
-            else:
-                if log:
-                    logger.log(f"ERROR: Unsupported model_short '{model_short}' for agent '{agent_name}'.")
-                raise ValueError(f"Unsupported model_short '{model_short}' for agent '{agent_name}'.")
-
-            content = "".join(content_parts)
-            end = time.time()
-            duration = end - begin
-            if not content:
-                print(f"{C.RED}[{agent_name}] returned empty content.{C.RESET}", file=sys.stderr)
-                if logger:
-                    logger.log(f"{duration:0.2f}s  -  {agent_name} returned empty response.")
-                return "[Agent returned empty response]"
-            if content:
-                logger.log(f"\n\n{duration:0.2f}s  -  {agent_name} response: " + content) if logger else None
-            return content
-
+            response = _stream_response(model, msg_list, max_tokens, _AGENT_STOPS, spinner)
         except openai.RateLimitError:
             spinner.stop()
-            delay = base_delay * (2 ** attempt) + random.uniform(0, 2)
-            print(f"\n  {C.YELLOW}⚠ Rate limited. Waiting {delay:.1f}s before retry "
-                  f"(attempt {attempt + 1}/{max_retries})...{C.RESET}")
-            if log:
-                logger.log(f"\n  Rate limited. Waiting {delay:.1f}s before retry (attempt {attempt + 1}/{max_retries})...")
-            time.sleep(delay)
-
-        except (
-                openai.APIConnectionError,
-                openai.APITimeoutError,
-                httpx.RemoteProtocolError,
-                httpx.ReadError,
-                httpx.ReadTimeout,
-                requests.exceptions.ChunkedEncodingError,
-                requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout,
-        ) as e:
-            spinner.stop()
-            delay = base_delay * (2 ** attempt) + random.uniform(0, 2)
+            delay = _retry_delay(attempt)
             print(
-                f"\n  {C.YELLOW}⚠ Transient network/stream error: {type(e).__name__}: {e}.{C.RESET}\n"
-                f"  {C.YELLOW}Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})...{C.RESET}"
-                )
-            if log:
-                logger.log(f"\n  Transient network/stream error: {type(e).__name__}: {e}. Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})...")
-            
+                f"\n  {C.YELLOW}⚠ Rate-limited — retrying in {delay:.1f}s "
+                f"({attempt + 1}/{_MAX_RETRIES}){C.RESET}"
+            )
+            _log(f"Rate-limited: {agent_name}.  Retry in {delay:.1f}s")
             time.sleep(delay)
-
-        except Exception as e:
+            continue
+        except _TRANSIENT_ERRORS as exc:
+            spinner.stop()
+            delay = _retry_delay(attempt)
+            print(
+                f"\n  {C.YELLOW}⚠ {type(exc).__name__}: {exc}.  "
+                f"Retrying in {delay:.1f}s{C.RESET}"
+            )
+            _log(f"Transient error ({type(exc).__name__}): {exc}.  Retry in {delay:.1f}s")
+            time.sleep(delay)
+            continue
+        except Exception:
             spinner.stop()
             raise
 
-    raise RuntimeError(f"Failed after {max_retries} retries due to transient API/connection errors.")
+        dur = time.time() - t_start
+        if not response:
+            print(
+                f"\n  {C.RED}[{agent_name}] returned an empty response.{C.RESET}",
+                file=sys.stderr,
+            )
+            _log(f"{agent_name} empty response after {dur:.1f}s")
+            return "[Agent returned empty response]"
+
+        _log(f"\n{'='*60}\n{agent_name} ({dur:.1f}s):\n{response}\n{'='*60}")
+        return response
+
+    raise RuntimeError(
+        f"call_agent({agent_name!r}) failed after {_MAX_RETRIES} retries."
+    )
 
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
+def call_tooling_agent(goals: str) -> str:
+    """
+    Run GLM as the tool execution agent.
 
-def run_tandem(user_task: str, max_turns: int = 8, logger: LOGGER = None) -> str:
-    print_header(user_task)
+    The model is prompted to emit tool-call syntax; Python executes those
+    calls for real and returns the actual output to the caller.
+    """
+    msg_list = [
+        {"role": "system", "content": TOOLING_AGENT_SYSTEM},
+        {"role": "user",   "content": goals},
+    ]
 
-    shared_history = [
+    t_start = time.time()
+    for attempt in range(_MAX_RETRIES):
+        spinner = Spinner("TOOLING_AGENT", C.YELLOW)
+        spinner.start()
+        try:
+            response = _stream_response(
+                GLM, msg_list, 16384, _TOOLING_STOPS, spinner,
+            )
+        except openai.RateLimitError:
+            spinner.stop()
+            delay = _retry_delay(attempt)
+            print(
+                f"\n  {C.YELLOW}⚠ Rate-limited (tooling) — retrying in {delay:.1f}s{C.RESET}"
+            )
+            _log(f"Tooling agent rate-limited.  Retry in {delay:.1f}s")
+            time.sleep(delay)
+            continue
+        except _TRANSIENT_ERRORS as exc:
+            spinner.stop()
+            delay = _retry_delay(attempt)
+            print(
+                f"\n  {C.YELLOW}⚠ {type(exc).__name__}: {exc}.  "
+                f"Retrying in {delay:.1f}s{C.RESET}"
+            )
+            _log(f"Tooling transient error: {exc}.  Retry in {delay:.1f}s")
+            time.sleep(delay)
+            continue
+        except Exception:
+            spinner.stop()
+            raise
+
+        dur = time.time() - t_start
+        if not response:
+            _log(f"Tooling agent empty response after {dur:.1f}s")
+            return "[Tooling agent returned empty response]"
+
+        # Execute the tool calls that the LLM emitted and get real output
+        tool_out = _dispatch_ops(response)
+
+        # Surface only the real Python-executed output to the main agents
+        if tool_out:
+            summary = "TOOL OUTPUT SUMMARY:\n" + tool_out
+        else:
+            # No tool ops parsed — return the model's raw text as context
+            summary = "TOOL OUTPUT SUMMARY:\n" + response.strip()
+
+        _log(f"\n{'='*60}\nTOOLING_AGENT ({dur:.1f}s):\n{summary}\n{'='*60}")
+        return summary
+
+    raise RuntimeError(
+        f"call_tooling_agent failed after {_MAX_RETRIES} retries."
+    )
+
+
+# ── Display helpers ────────────────────────────────────────────────────────────
+
+def _print_header(task: str) -> None:
+    w = 66
+    print(f"\n{C.BOLD}{'━' * w}{C.RESET}")
+    print(f"{C.BOLD}  SIMPLE-AGENTS — TANDEM SESSION{C.RESET}")
+    print(f"{'━' * w}")
+    print(f"  {C.DIM}Task:{C.RESET}      {task[:w - 10]}")
+    print(f"  {C.DIM}PLANNER:{C.RESET}   GLM-5.1")
+    print(f"  {C.DIM}CODER:{C.RESET}     Qwen3-Coder-480B")
+    print(f"  {C.DIM}OS:{C.RESET}        {OS_NAME}")
+    print(f"  {C.DIM}Workspace:{C.RESET} {WORKSPACE}")
+    print(f"{'━' * w}\n")
+
+
+def _print_turn_banner(turn: int, agent_name: str, max_turns: int) -> None:
+    colour = C.CYAN if agent_name == "PLANNER" else C.MAGENTA
+    print(f"\n{colour}{C.BOLD}{'─' * 66}{C.RESET}")
+    print(f"{colour}{C.BOLD}  {agent_name}  — turn {turn}/{max_turns}{C.RESET}")
+    print(f"{colour}{'─' * 66}{C.RESET}")
+
+
+def _print_done(agent_name: str, elapsed: float, turns: int) -> None:
+    print(f"\n{'━' * 66}")
+    print(f"{C.GREEN}{C.BOLD}  ✓ Session complete{C.RESET}")
+    print(f"  {C.DIM}Finished by:{C.RESET}  {agent_name}")
+    print(f"  {C.DIM}Turns used:{C.RESET}   {turns}")
+    print(f"  {C.DIM}Total time:{C.RESET}   {elapsed:.1f}s")
+    print(f"{'━' * 66}\n")
+
+
+# ── Main loop ──────────────────────────────────────────────────────────────────
+
+def run_session(task: str, max_turns: int, n_planning_turns: int) -> None:
+    _print_header(task)
+
+    shared_history: list[tuple[str, str]] = [
         ("USER", (
-            f"Task: {user_task}\n\n"
-            f"PLANNER : begin now. Call TOOLING_AGENT to confirm the environment, "
-            f"then list every file you need CODER to create with full absolute paths. "
-            f"Use TOOLING_AGENT for every file read, file write, shell command, memory action, and web lookup."
-            f"Read from persistent memory before you do anything else."
+            f"Task: {task}\n\n"
+            f"PLANNER: begin now.\n"
+            f"• First, read persistent memory (READ_FROM_MEMORY) and confirm the "
+            f"environment (GET_SPECS: or a quick RUN:).\n"
+            f"• List every file you need CODER to create with full absolute paths.\n"
+            f"• Use TOOLING_AGENT for ALL file writes, shell commands, and memory ops.\n"
+            f"• Direct CODER one step at a time after your plan is finalised."
         ))
     ]
 
-
-    #agents = [("PLANNER", GEMMA), ("CODER", QWEN_CODER), ("PLANNER2", GLM), ("CODER2", DEEPSEEK)]
-    # Skip broken Gemma; use only GLM
-    agents = [("PLANNER", GLM), ("CODER", GLM)]
-
-    last_output = ""
+    # PLANNER-only for the first n_planning_turns, then alternate PLANNER / CODER
+    agents = ["PLANNER", "CODER"]
     session_start = time.time()
 
     for turn in range(1, max_turns + 1):
-        begin = time.time()
-        if turn <= n_planning_turns:  ## planner is to coordinate during initial planning phase
-            agent_name, model = agents[(turn - 1) % 1]
-        else:  ## after planning phase, all agents work together
-            agent_name, model = agents[(turn - 1) % 2]
+        if turn <= n_planning_turns:
+            agent_name = "PLANNER"
+        else:
+            agent_name = agents[(turn - 1) % 2]
 
-        print_turn_banner(turn, agent_name, max_turns)
-        
-        response = call_agent(model, agent_name, shared_history, max_tokens=16384, logger=logger)
-        goals = get_tool_goals(response)
+        _print_turn_banner(turn, agent_name, max_turns)
 
+        response = call_agent(agent_name, shared_history)
         shared_history.append((agent_name, response))
-        end = time.time()
-        if(log):
-            with open("log.txt", "a", encoding="utf-8") as log_file:
-                log_file.write(f"TURN {turn} - {agent_name}, Duration: {end - begin:0.2f}s\n")
+        _log(f"Turn {turn}: {agent_name}")
 
+        # Invoke the tooling agent whenever the main agent calls for it
         if "TOOLING_AGENT," in response:
-            tool_response = call_tooling_agent(goals, logger)
+            goals_start  = response.index("TOOLING_AGENT,") + len("TOOLING_AGENT,")
+            goals        = response[goals_start:].strip()
+            tool_response = call_tooling_agent(goals)
             shared_history.append(("[TOOLING_AGENT]", tool_response))
-            # The agent's own text was already streamed live. Just print the tool result.
-            print()
-            color = C.CYAN if agent_name == "PLANNER" else C.MAGENTA
-            label = f"{color}{C.BOLD}[TOOLING_AGENT]{C.RESET}"
-            print(f"   {label}")
+
+            colour = C.CYAN if agent_name == "PLANNER" else C.MAGENTA
+            print(f"\n  {colour}{C.BOLD}[TOOLING_AGENT]{C.RESET}")
             for line in tool_response.strip().splitlines():
                 print(f"      {line}")
-            last_output = response + f"\n\n[TOOLING_AGENT]\n{tool_response}"
-        else:
-            # No tooling call — agent text was already streamed, nothing extra to show.
-            last_output = response
 
         if "DONE:" in response:
-            print_done(agent_name, time.time() - session_start, turn)
-            if log: logger.log(f"Session completed with DONE signal from {agent_name} at turn {turn}.")
-            break
+            _print_done(agent_name, time.time() - session_start, turn)
+            _log(f"Session complete: DONE: from {agent_name} at turn {turn}.")
+            return
 
-        if len(shared_history) > 26:
-            shared_history = [shared_history[0]] + shared_history[-25:]
+        # Trim shared history to avoid unbounded context growth
+        if len(shared_history) > 30:
+            shared_history = [shared_history[0]] + shared_history[-28:]
 
-        time.sleep(3)
-    else:
-        print(f"\n{C.YELLOW}  Reached max turns ({max_turns}) without DONE signal.{C.RESET}\n")
-        if log:
-            logger.log(f"Reached max turns ({max_turns}) without DONE signal.")
+        time.sleep(3)  # brief pause to avoid hammering the API
 
-    return last_output
-
-print("Starting!")
-print(f"Prompt is: {task}")
-logger = None
-if log:
-    os.makedirs("logs", exist_ok=True)
-    logger = LOGGER(f"logs/Log-{time.ctime(time.time()).replace(' ', '_').replace(':', '-')}.txt")
-    logger.log(f"Session started.")
-    logger.log(f"User is on {"Windows" if windows else "Linux"}.")
-    logger.log(f"Prompt for this session is: {task}")
-    logger.log(f"Agent systems are: \n --------- \n {"\n --------- \n".join(systems)} \n --------- \n END SYSTEM PROMPTS \n")
+    print(
+        f"\n{C.YELLOW}  Reached max turns ({max_turns}) without a DONE: signal.{C.RESET}\n"
+    )
+    _log(f"Session ended: max turns ({max_turns}) reached without DONE.")
 
 
-run_tandem(
-    user_task=task,
-    max_turns=max_turns,
-    logger=logger
-)
+# ── Entry point ────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    print(f"Starting…  Task: {TASK[:120]}")
+    _log(f"Session started.  OS: {OS_NAME}.  Task: {TASK}")
+    _log(
+        f"PLANNER system:\n{PLANNER_SYSTEM}\n\n"
+        f"CODER system:\n{CODER_SYSTEM}\n\n"
+        f"TOOLING_AGENT system:\n{TOOLING_AGENT_SYSTEM}"
+    )
+
+    run_session(
+        task=TASK,
+        max_turns=ARGS.max_turns,
+        n_planning_turns=ARGS.init_planning_turns,
+    )
