@@ -1042,7 +1042,8 @@ def _model_extra_body(model: str, enable_thinking: bool = True) -> dict:
     if model == "deepseek-ai/deepseek-v4-flash":
         return {"chat_template_kwargs": {"thinking": False}}
     if model == QWEN_CODER:
-        # Qwen3 on NVIDIA API requires enable_thinking to be explicitly set to avoid HTTP 500
+        # qwen/qwen3-coder-480b-a35b-instruct on the NVIDIA API requires enable_thinking
+        # to be explicitly set in chat_template_kwargs; omitting it causes HTTP 500 errors.
         return {"chat_template_kwargs": {"enable_thinking": enable_thinking}}
     return {}
 
@@ -1065,7 +1066,7 @@ def _stream_response(
         model=model,
         messages=messages,
         max_tokens=max_tokens,
-        temperature=0.6 if model == QWEN_CODER else 1.0,
+        temperature=0.7 if model == QWEN_CODER else 1.0,
         top_p=0.95,
         stream=True,
         stop=stop_seqs,
