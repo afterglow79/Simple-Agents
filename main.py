@@ -99,6 +99,11 @@ _ap.add_argument(
     metavar="MODEL",
     help=f"Model for the CODER agent. Choices: {', '.join(MODEL_CHOICES)}. Default: qwen.",
 )
+_ap.add_argument(
+    "--tooling_model", choices=list(MODEL_CHOICES), default="qwen",
+    metavar="MODEL",
+    help=f"Model for the TOOLING agent. Choices: {', '.join(MODEL_CHOICES)}. Default: qwen.",
+)
 ARGS = _ap.parse_args()
 
 # ── Environment ────────────────────────────────────────────────────────────────
@@ -135,11 +140,12 @@ client = OpenAI(
 
 # ── Model names ────────────────────────────────────────────────────────────────
 
-GLM           = MODEL_CHOICES["glm"]       # tooling agent always uses GLM
+GLM           = MODEL_CHOICES["glm"]
 QWEN_CODER    = MODEL_CHOICES["qwen"]
 DEEPSEEK      = MODEL_CHOICES["deepseek"]
-PLANNER_MODEL = MODEL_CHOICES[ARGS.planner_model]
-CODER_MODEL   = MODEL_CHOICES[ARGS.coder_model]
+PLANNER_MODEL  = MODEL_CHOICES[ARGS.planner_model]
+CODER_MODEL    = MODEL_CHOICES[ARGS.coder_model]
+TOOLING_MODEL  = MODEL_CHOICES[ARGS.tooling_model]
 
 # ── Terminal colours ───────────────────────────────────────────────────────────
 
@@ -508,8 +514,8 @@ def _deep_think(query: str) -> str:
     spinner = Spinner("THINK", C.BLUE)
     spinner.start()
     try:
-        # Always use GLM for thinking — it has the best chain-of-thought
-        result = _stream_response(GLM, messages, 8192, [], spinner)
+        # Use PLANNER_MODEL for deep thinking (benefits from reasoning capability)
+        result = _stream_response(PLANNER_MODEL, messages, 8192, [], spinner)
     except Exception as exc:
         spinner.stop()
         return f"ERROR in THINK: {exc}"
@@ -1029,12 +1035,16 @@ _TOOLING_STOPS = [
 ]
 
 
-def _model_extra_body(model: str) -> dict:
+def _model_extra_body(model: str, enable_thinking: bool = True) -> dict:
     """Return model-specific extra_body parameters."""
     if model == GLM:
-        return {"chat_template_kwargs": {"enable_thinking": True, "clear_thinking": False}}
+        return {"chat_template_kwargs": {"enable_thinking": enable_thinking, "clear_thinking": False}}
     if model == "deepseek-ai/deepseek-v4-flash":
         return {"chat_template_kwargs": {"thinking": False}}
+    if model == QWEN_CODER:
+        # qwen/qwen3-coder-480b-a35b-instruct on the NVIDIA API requires enable_thinking
+        # to be explicitly set in chat_template_kwargs; omitting it causes HTTP 500 errors.
+        return {"chat_template_kwargs": {"enable_thinking": enable_thinking}}
     return {}
 
 
@@ -1044,13 +1054,14 @@ def _stream_response(
     max_tokens: int,
     stop_seqs: list[str],
     spinner: Spinner,
+    enable_thinking: bool = True,
 ) -> str:
     """
     Stream a response from the NVIDIA API.
     Reasoning tokens are printed in grey but excluded from the return value.
     Returns the collected content text.
     """
-    extra = _model_extra_body(model)
+    extra = _model_extra_body(model, enable_thinking=enable_thinking)
     params: dict = dict(
         model=model,
         messages=messages,
@@ -1130,8 +1141,8 @@ def _stream_response(
 # ── Agent callers ──────────────────────────────────────────────────────────────
 
 _AGENT_CFG: dict[str, tuple[str, str, str]] = {
-    "PLANNER": (GLM,        PLANNER_SYSTEM, C.CYAN),
-    "CODER":   (QWEN_CODER, CODER_SYSTEM,   C.MAGENTA),
+    "PLANNER": (PLANNER_MODEL, PLANNER_SYSTEM, C.CYAN),
+    "CODER":   (CODER_MODEL,   CODER_SYSTEM,   C.MAGENTA),
 }
 
 _MAX_RETRIES  = 5
@@ -1240,7 +1251,7 @@ def call_agent(
 
 def call_tooling_agent(goals: str) -> str:
     """
-    Run GLM as the tool execution agent.
+    Run the tooling model as the tool execution agent.
 
     The model is prompted to emit tool-call syntax; Python executes those
     calls for real and returns the actual output to the caller.
@@ -1256,7 +1267,8 @@ def call_tooling_agent(goals: str) -> str:
         spinner.start()
         try:
             response = _stream_response(
-                GLM, msg_list, 16384, _TOOLING_STOPS, spinner,
+                TOOLING_MODEL, msg_list, 16384, _TOOLING_STOPS, spinner,
+                enable_thinking=False,  # disable thinking for clean tool syntax output
             )
         except openai.RateLimitError:
             spinner.stop()
@@ -1312,8 +1324,9 @@ def _print_header(task: str) -> None:
     print(f"{C.BOLD}  SIMPLE-AGENTS — TANDEM SESSION{C.RESET}")
     print(f"{'━' * w}")
     print(f"  {C.DIM}Task:{C.RESET}      {task[:w - 10]}")
-    print(f"  {C.DIM}PLANNER:{C.RESET}   GLM-5.1")
-    print(f"  {C.DIM}CODER:{C.RESET}     Qwen3-Coder-480B")
+    print(f"  {C.DIM}PLANNER:{C.RESET}   {_MODEL_DISPLAY.get(PLANNER_MODEL, PLANNER_MODEL)}")
+    print(f"  {C.DIM}CODER:{C.RESET}     {_MODEL_DISPLAY.get(CODER_MODEL, CODER_MODEL)}")
+    print(f"  {C.DIM}TOOLING:{C.RESET}   {_MODEL_DISPLAY.get(TOOLING_MODEL, TOOLING_MODEL)}")
     print(f"  {C.DIM}OS:{C.RESET}        {OS_NAME}")
     print(f"  {C.DIM}Workspace:{C.RESET} {WORKSPACE}")
     print(f"{'━' * w}\n")
