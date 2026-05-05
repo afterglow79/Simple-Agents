@@ -15,6 +15,7 @@ import random
 import re
 import subprocess
 import sys
+import collections
 import threading
 import time
 import argparse
@@ -53,6 +54,8 @@ MODEL_CHOICES: dict[str, str] = {
     "glm":      "z-ai/glm-5.1",
     "qwen":     "qwen/qwen3-coder-480b-a35b-instruct",
     "deepseek": "deepseek-ai/deepseek-v4-flash",
+    "kimi":     "moonshotai/kimi-k2.6",
+    "mistral":  "mistralai/mistral-large-3-675b-instruct-2512",
 }
 _MODEL_DISPLAY: dict[str, str] = {v: k.upper() for k, v in MODEL_CHOICES.items()}
 
@@ -104,6 +107,14 @@ _ap.add_argument(
     metavar="MODEL",
     help=f"Model for the TOOLING agent. Choices: {', '.join(MODEL_CHOICES)}. Default: qwen.",
 )
+_ap.add_argument(
+    "--frequency_penalty", type=float, default=1.1,
+    help="Default frequency_penalty passed to the model (reduces repetition).",
+)
+_ap.add_argument(
+    "--presence_penalty", type=float, default=0.2,
+    help="Default presence_penalty passed to the model (discourages new topics).",
+)
 ARGS = _ap.parse_args()
 
 # ── Environment ────────────────────────────────────────────────────────────────
@@ -146,6 +157,8 @@ DEEPSEEK      = MODEL_CHOICES["deepseek"]
 PLANNER_MODEL  = MODEL_CHOICES[ARGS.planner_model]
 CODER_MODEL    = MODEL_CHOICES[ARGS.coder_model]
 TOOLING_MODEL  = MODEL_CHOICES[ARGS.tooling_model]
+FREQUENCY_PENALTY = float(getattr(ARGS, "frequency_penalty", 0.6))
+PRESENCE_PENALTY = float(getattr(ARGS, "presence_penalty", 0.2))
 
 # ── Terminal colours ───────────────────────────────────────────────────────────
 
@@ -265,10 +278,47 @@ def _run_command(cmd: str) -> str:
         return f"ERROR: {exc}"
 
 
+def _normalize_path(path: str) -> str:
+    """Normalize and sanitize a file path provided by an agent/model.
+
+    - Strip surrounding quotes, backticks and simple HTML-like tags
+    - Expand env vars and ~, convert slashes, normpath + abspath
+    - If a relative path is provided, make it relative to WORKSPACE
+    """
+    if not isinstance(path, str):
+        return path
+    p = path.strip()
+    # Remove common surrounding quoting characters and simple markup
+    p = p.strip('`"\'')
+    p = re.sub(r"^<code>|</code>$", "", p, flags=re.IGNORECASE)
+    p = p.strip()
+
+    # Expand environment variables and user home
+    p = os.path.expandvars(p)
+    p = os.path.expanduser(p)
+
+    # Convert to OS-specific separators and normalize
+    if IS_WINDOWS:
+        p = p.replace('/', os.sep)
+    p = os.path.normpath(p)
+
+    # If not absolute, treat as workspace-relative (more forgiving than failing)
+    if not os.path.isabs(p):
+        p = os.path.join(WORKSPACE, p)
+
+    try:
+        p = os.path.abspath(p)
+    except Exception:
+        # Fall back to the raw normalized value
+        pass
+    return p
+
+
 def _write_file(path: str, content: str) -> str:
     """Write *content* to *path*, creating parent directories as needed."""
     try:
-        parent = os.path.dirname(os.path.abspath(path))
+        path = _normalize_path(path)
+        parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
@@ -277,12 +327,13 @@ def _write_file(path: str, content: str) -> str:
         _log(f"WRITE_FILE: {path} ({size} bytes)")
         return f"Wrote {size} bytes to {path}"
     except Exception as exc:
-        _log(f"WRITE_FILE ERROR: {path}: {exc}")
+        _log(f"WRITE_FILE ERROR: {repr(path)}: {exc}")
         return f"ERROR writing {path}: {exc}"
 
 
 def _read_file(path: str) -> str:
     """Return the contents of *path*, or an error string."""
+    path = _normalize_path(path)
     if not os.path.exists(path):
         return f"ERROR: file not found: {path}"
     try:
@@ -291,6 +342,7 @@ def _read_file(path: str) -> str:
         _log(f"READ_FILE: {path} ({len(content)} chars)")
         return content
     except Exception as exc:
+        _log(f"READ_FILE ERROR: {repr(path)}: {exc}")
         return f"ERROR reading {path}: {exc}"
 
 
@@ -384,6 +436,7 @@ def _patch_file(path: str, patch_body: str) -> str:
         new text
         >>>>>>> REPLACE
     """
+    path = _normalize_path(path)
     if not os.path.exists(path):
         return f"ERROR: file not found: {path}"
     try:
@@ -412,6 +465,7 @@ def _patch_file(path: str, patch_body: str) -> str:
         _log(f"PATCH_FILE: {path} ({len(matches)} patch(es), {size} bytes)")
         return f"Applied {len(matches)} patch(es) to {path} — {size} bytes total."
     except Exception as exc:
+        _log(f"PATCH_FILE ERROR: {repr(path)}: {exc}")
         return f"ERROR patching {path}: {exc}"
 
 
@@ -453,7 +507,8 @@ def _list_dir(path: str) -> str:
 def _append_file(path: str, content: str) -> str:
     """Append *content* to *path*, creating it if needed."""
     try:
-        parent = os.path.dirname(os.path.abspath(path))
+        path = _normalize_path(path)
+        parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
         with open(path, "a", encoding="utf-8") as fh:
@@ -462,6 +517,7 @@ def _append_file(path: str, content: str) -> str:
         _log(f"APPEND_FILE: {path} ({size} bytes total)")
         return f"Appended to {path} — {size} bytes total."
     except Exception as exc:
+        _log(f"APPEND_FILE ERROR: {repr(path)}: {exc}")
         return f"ERROR appending to {path}: {exc}"
 
 
@@ -795,6 +851,7 @@ def _dispatch_ops(text: str, allow_delegate: bool = True) -> str:
 
         if kind == "WRITE_FILE":
             _, path, content = op
+            path = _normalize_path(path)
             print(f"\n  {C.YELLOW}✎ Write:{C.RESET}  {path}")
             result = _write_file(path, content)
             print(f"  {C.DIM}→ {result}{C.RESET}")
@@ -802,6 +859,7 @@ def _dispatch_ops(text: str, allow_delegate: bool = True) -> str:
 
         elif kind == "PATCH_FILE":
             _, path, patch = op
+            path = _normalize_path(path)
             print(f"\n  {C.YELLOW}✂ Patch:{C.RESET}  {path}")
             result = _patch_file(path, patch)
             print(f"  {C.DIM}→ {result}{C.RESET}")
@@ -809,6 +867,7 @@ def _dispatch_ops(text: str, allow_delegate: bool = True) -> str:
 
         elif kind == "APPEND_FILE":
             _, path, content = op
+            path = _normalize_path(path)
             print(f"\n  {C.YELLOW}➕ Append:{C.RESET} {path}")
             result = _append_file(path, content)
             print(f"  {C.DIM}→ {result}{C.RESET}")
@@ -823,6 +882,7 @@ def _dispatch_ops(text: str, allow_delegate: bool = True) -> str:
 
         elif kind == "READ_FILE":
             _, path = op
+            path = _normalize_path(path)
             print(f"\n  {C.YELLOW}📖 Read:{C.RESET}  {path}")
             result = _trim_out(_read_file(path))
             print(f"  {C.DIM}→ {result[:200]}{C.RESET}")
@@ -1045,6 +1105,9 @@ def _model_extra_body(model: str, enable_thinking: bool = True) -> dict:
         # qwen/qwen3-coder-480b-a35b-instruct on the NVIDIA API requires enable_thinking
         # to be explicitly set in chat_template_kwargs; omitting it causes HTTP 500 errors.
         return {"chat_template_kwargs": {"enable_thinking": enable_thinking}}
+    if model == "moonshotai/kimi-k2.6":
+        # Kimi K2.6 supports a thinking flag; enable it by default for richer reasoning.
+        return {"chat_template_kwargs": {"thinking": True}}
     return {}
 
 
@@ -1055,6 +1118,8 @@ def _stream_response(
     stop_seqs: list[str],
     spinner: Spinner,
     enable_thinking: bool = True,
+    frequency_penalty: float | None = None,
+    presence_penalty: float | None = None,
 ) -> str:
     """
     Stream a response from the NVIDIA API.
@@ -1062,6 +1127,20 @@ def _stream_response(
     Returns the collected content text.
     """
     extra = _model_extra_body(model, enable_thinking=enable_thinking)
+    # The underlying API enforces a small maximum number of stop sequences.
+    # Trim overly long stop lists to a safe length (<= 3) and log the action.
+    safe_stops = stop_seqs or []
+    try:
+        if isinstance(safe_stops, (list, tuple)) and len(safe_stops) > 3:
+            _log(f"TRIM_STOP_SEQS: provided {len(safe_stops)} stops; using first 3")
+            safe_stops = list(safe_stops)[:3]
+    except Exception:
+        safe_stops = stop_seqs
+
+    # Use provided penalties or fall back to CLI/global defaults
+    fp = frequency_penalty if frequency_penalty is not None else FREQUENCY_PENALTY
+    pp = presence_penalty if presence_penalty is not None else PRESENCE_PENALTY
+
     params: dict = dict(
         model=model,
         messages=messages,
@@ -1069,7 +1148,9 @@ def _stream_response(
         temperature=0.7 if model == QWEN_CODER else 1.0,
         top_p=0.95,
         stream=True,
-        stop=stop_seqs,
+        stop=safe_stops,
+        frequency_penalty=fp,
+        presence_penalty=pp,
     )
     if extra:
         params["extra_body"] = extra
@@ -1079,6 +1160,12 @@ def _stream_response(
     content_parts: list[str] = []
     had_reasoning   = False
     spinner_stopped = False
+
+    # Simple repetition suppression: track recent full sentences and skip
+    # printing/collecting a sentence if it has already been emitted recently.
+    recent = collections.deque(maxlen=200)
+    recent_set: set[str] = set()
+    tail_partial = ""
 
     for chunk in completion:
         # Stop the spinner the first time any content arrives
@@ -1111,7 +1198,45 @@ def _stream_response(
             print(f"\n{C.RESET}", end="", flush=True)
             had_reasoning = False
 
-        full_so_far = "".join(content_parts) + text
+        # Repetition suppression: split incoming text into sentence-like pieces.
+        combined = tail_partial + text
+        # Split on sentence enders but keep the enders attached
+        parts = re.split(r'(?<=[.!?\n])\s+', combined)
+        # If the last part does not end with a sentence terminator, keep it as tail
+        if parts and not re.search(r'[.!?\n]$', parts[-1]):
+            tail_partial = parts.pop() or ""
+        else:
+            tail_partial = ""
+
+        emitted_chunk = []
+        for part in parts:
+            s = part.strip()
+            if not s:
+                continue
+            # Normalize for comparison
+            key = re.sub(r'\s+', ' ', s.lower()).strip()
+            if key in recent_set:
+                # skip repeated sentence
+                continue
+            # record and emit
+            recent.append(key)
+            recent_set.add(key)
+            # keep recent_set small via deque eviction
+            if len(recent) > recent.maxlen:
+                try:
+                    old = recent.popleft()
+                    recent_set.discard(old)
+                except Exception:
+                    recent.clear(); recent_set.clear()
+            emitted_chunk.append(part)
+
+        if not emitted_chunk and not tail_partial:
+            # nothing new to emit from this chunk
+            continue
+
+        out_text = "".join(emitted_chunk) + (tail_partial or "")
+
+        full_so_far = "".join(content_parts) + out_text
         low = full_so_far.lower()
 
         # Client-side stop-sequence check (belt-and-suspenders)
