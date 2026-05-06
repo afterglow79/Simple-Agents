@@ -993,7 +993,9 @@ Rules: absolute paths only · TOOLING_AGENT, at END · verify WRITE_FILE with {L
 never fake tool output · fix every error before continuing · files < {ARGS.max_lines} lines
 workspace: {WORKSPACE} · Never repeat anything ever · do not pretend to be something you aren't 
 · always wait for the tooling agent's output after asking for a run 
-· Your turn is to immediately end after you ask tooling agent for anything."""
+· Your turn is to immediately end after you ask tooling agent for anything.
+· Never assume the output of a tool response. Only believe what the program tells you.
+· Never write the output of a tool response."""
 
 
 _TOOL_REF = _tool_reference()
