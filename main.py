@@ -157,7 +157,7 @@ DEEPSEEK      = MODEL_CHOICES["deepseek"]
 PLANNER_MODEL  = MODEL_CHOICES[ARGS.planner_model]
 CODER_MODEL    = MODEL_CHOICES[ARGS.coder_model]
 TOOLING_MODEL  = MODEL_CHOICES[ARGS.tooling_model]
-FREQUENCY_PENALTY = float(getattr(ARGS, "frequency_penalty", 0.6))
+FREQUENCY_PENALTY = float(getattr(ARGS, "frequency_penalty", 2))
 PRESENCE_PENALTY = float(getattr(ARGS, "presence_penalty", 0.2))
 
 # ── Terminal colours ───────────────────────────────────────────────────────────
