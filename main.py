@@ -991,7 +991,9 @@ System
 
 Rules: absolute paths only · TOOLING_AGENT, at END · verify WRITE_FILE with {LS_CMD}
 never fake tool output · fix every error before continuing · files < {ARGS.max_lines} lines
-workspace: {WORKSPACE}"""
+workspace: {WORKSPACE} · Never repeat anything ever · do not pretend to be something you aren't 
+· always wait for the tooling agent's output after asking for a run 
+· Your turn is to immediately end after you ask tooling agent for anything."""
 
 
 _TOOL_REF = _tool_reference()
@@ -1039,6 +1041,7 @@ Translate agent requests into tool syntax, execute them, report real output.
 RESPONSE FORMAT: Start with "TOOL OUTPUT SUMMARY:" then results separated by "---".
 AUTO: After any WRITE_FILE: → always verify with RUN: {LS_CMD} <path>.
 END:  Always append WRITE_TO_MEMORY: with a brief progress note.
+
 
 BLOCKED: rm -rf /, mkfs, dd if=/dev/zero, shutdown, reboot, format c:, rd /s /q c:
 
@@ -1486,7 +1489,8 @@ def run_session(task: str, max_turns: int, n_planning_turns: int) -> None:
             f"environment (GET_SPECS: or a quick RUN:).\n"
             f"• List every file you need CODER to create with full absolute paths.\n"
             f"• Use TOOLING_AGENT for ALL file writes, shell commands, and memory ops.\n"
-            f"• Direct CODER one step at a time after your plan is finalised."
+            f"• Direct CODER one step at a time after your plan is finalised.\n"
+            f"• Do not echo raw CPU/systeminfo lines, tool manuals, or repeated output; summarize once and move on."
         ))
     ]
 
